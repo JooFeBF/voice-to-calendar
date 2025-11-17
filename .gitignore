@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+service-account-key.json
+*.mp3
+*.wav
+*.m4a
+logs/
+temp/
+*.ogg

@@ -1,0 +1,30 @@
+{
+  "name": "audio-to-calendar",
+  "version": "1.0.0",
+  "description": "Audio to Google Calendar event pipeline",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "server": "node dist/server.js",
+    "dev": "ts-node src/index.ts",
+    "dev:server": "ts-node src/server.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@types/express": "^5.0.5",
+    "dotenv": "^16.4.5",
+    "express": "^5.1.0",
+    "google-auth-library": "^9.15.0",
+    "googleapis": "^144.0.0",
+    "openai": "^4.73.0",
+    "winston": "^3.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2"
+  }
+}
