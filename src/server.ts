@@ -76,6 +76,99 @@ async function startServer(): Promise<void> {
   const audioRoutes = createAudioRoutes(storageService, config);
   app.use('/api/audio', audioRoutes);
 
+  // Endpoint to poll for currently occurring events and generate audio on-demand
+  app.get('/api/events/current', async (req: Request, res: Response, next: NextFunction) => {
+    logger.info('Checking for currently occurring events');
+
+    try {
+      const now = new Date();
+      const timeMin = now.toISOString();
+      const timeMax = new Date(now.getTime() + 60 * 60 * 1000).toISOString(); // 1 hour window
+
+      // Get events from calendar that are currently occurring
+      const events = await controller.calendarService.listEvents(timeMin, timeMax, 10);
+
+      // Filter for events that are currently occurring (now >= start && now <= end)
+      const currentEvents = events.filter(event => {
+        if (!event.start?.dateTime || !event.end?.dateTime) return false;
+        const eventStart = new Date(event.start.dateTime);
+        const eventEnd = new Date(event.end.dateTime);
+        return now >= eventStart && now <= eventEnd;
+      });
+
+      if (currentEvents.length === 0) {
+        logger.info('No events currently occurring');
+        res.status(200).json({
+          hasPending: false,
+          message: 'No events currently occurring'
+        });
+        return;
+      }
+
+      // Process the first currently occurring event
+      const event = currentEvents[0];
+      logger.info('Found currently occurring event', {
+        eventId: event.id,
+        title: event.summary,
+        start: event.start?.dateTime,
+        end: event.end?.dateTime
+      });
+
+      // Generate audio for this event on-demand
+      const tempEventId = `poll_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+      const outputPath = storageService.getOutputAudioPath(tempEventId);
+
+      const audioResult = await controller.generateEventAudioAndDelete(
+        event.id as string,
+        outputPath
+      );
+
+      if (audioResult.success && audioResult.audioPath) {
+        // Store the audio path with the calendar event ID
+        storageService.setStatus(tempEventId, {
+          status: 'ready',
+          audioPath: audioResult.audioPath,
+          eventId: event.id as string
+        });
+
+        logger.info('Audio generated for currently occurring event', {
+          calendarEventId: event.id,
+          audioPath: audioResult.audioPath
+        });
+
+        res.status(200).json({
+          hasPending: true,
+          eventId: tempEventId, // Return temp event ID for download
+          calendarEventId: event.id,
+          title: event.summary,
+          start: event.start?.dateTime,
+          end: event.end?.dateTime
+        });
+      } else {
+        logger.error('Failed to generate audio for current event', {
+          eventId: event.id,
+          error: audioResult.error
+        });
+
+        res.status(500).json({
+          hasPending: false,
+          error: audioResult.error || 'Failed to generate audio for current event'
+        });
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logger.error('Error checking for current events', {
+        error: errorMessage,
+        stack: error instanceof Error ? error.stack : undefined
+      });
+
+      res.status(500).json({
+        hasPending: false,
+        error: errorMessage
+      });
+    }
+  });
+
   app.post('/api/audio/process/:eventId', async (req: Request, res: Response, next: NextFunction) => {
     const { eventId } = req.params;
     
@@ -94,54 +187,7 @@ async function startServer(): Promise<void> {
       logger.debug('Processing audio file', { eventId, inputPath });
       const result = await controller.processAudioFile(inputPath);
 
-      if (result.success && result.calendarEvent) {
-        logger.info('Audio processed successfully, generating event audio', {
-          eventId,
-          calendarEventId: result.calendarEvent.id,
-          operation: result.operation
-        });
-
-        const audioResult = await controller.generateEventAudioAndDelete(
-          result.calendarEvent.id as string,
-          outputPath
-        );
-
-        if (audioResult.success && audioResult.audioPath) {
-          storageService.setStatus(eventId, {
-            status: 'ready',
-            audioPath: audioResult.audioPath,
-            eventId: result.calendarEvent.id as string
-          });
-
-          logger.info('Event audio generated successfully', {
-            eventId,
-            calendarEventId: result.calendarEvent.id,
-            audioPath: audioResult.audioPath
-          });
-
-          res.status(200).json({
-            success: true,
-            eventId,
-            calendarEventId: result.calendarEvent.id,
-            audioReady: true
-          });
-        } else {
-          storageService.setStatus(eventId, {
-            status: 'error',
-            error: audioResult.error || 'Failed to generate audio'
-          });
-
-          logger.error('Failed to generate event audio', {
-            eventId,
-            error: audioResult.error
-          });
-
-          res.status(500).json({
-            success: false,
-            error: audioResult.error || 'Failed to generate audio'
-          });
-        }
-      } else {
+      if (!result.success) {
         storageService.setStatus(eventId, {
           status: 'error',
           error: result.error || 'Failed to process audio'
@@ -155,6 +201,69 @@ async function startServer(): Promise<void> {
         res.status(500).json({
           success: false,
           error: result.error || 'Failed to process audio'
+        });
+        return;
+      }
+
+      // Handle "no_action" case - event already exists, no action needed
+      if (result.operation === 'no_action') {
+        storageService.setStatus(eventId, {
+          status: 'no_action',
+          reason: result.eventDetails?.description || 'Event already exists'
+        });
+
+        logger.info('No action needed - event already exists', {
+          eventId,
+          reason: result.eventDetails?.description
+        });
+
+        res.status(200).json({
+          success: true,
+          eventId,
+          operation: 'no_action',
+          message: result.eventDetails?.description || 'Event already exists',
+          audioReady: false
+        });
+        return;
+      }
+
+      // Handle successful operations that created/updated/deleted an event
+      if (result.calendarEvent) {
+        logger.info('Audio processed successfully, event created/updated', {
+          eventId,
+          calendarEventId: result.calendarEvent.id,
+          operation: result.operation
+        });
+
+        // Store the calendar event ID for later polling
+        storageService.setStatus(eventId, {
+          status: 'ready',
+          eventId: result.calendarEvent.id as string
+        });
+
+        res.status(200).json({
+          success: true,
+          eventId,
+          calendarEventId: result.calendarEvent.id,
+          operation: result.operation,
+          eventDetails: result.eventDetails,
+          message: 'Event processed successfully. Poll /api/events/current to get audio when event is occurring.'
+        });
+      } else {
+        // This shouldn't happen, but handle it gracefully
+        storageService.setStatus(eventId, {
+          status: 'error',
+          error: 'Processing succeeded but no calendar event was returned'
+        });
+
+        logger.error('Processing succeeded but no calendar event returned', {
+          eventId,
+          operation: result.operation
+        });
+
+        res.status(500).json({
+          success: false,
+          error: 'Processing succeeded but no calendar event was returned'
         });
       }
     } catch (error) {

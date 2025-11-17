@@ -3,10 +3,11 @@ import { PipelineOptions, PipelineResult, EventDetails } from '../models';
 import { AuthClient } from 'google-auth-library';
 import { calendar_v3 } from 'googleapis';
 import logger from '../utils/logger';
+import { replaceRelativeDate } from '../utils/dateUtils';
 
 export class AudioToCalendarController {
   private openaiService: OpenAIService;
-  private calendarService: CalendarService;
+  public readonly calendarService: CalendarService;
 
   constructor(
     openaiKey: string, 
@@ -81,8 +82,8 @@ export class AudioToCalendarController {
       if (eventDetailsRaw.operation === 'create') {
         const eventDetails: EventDetails = {
           title: eventDetailsRaw.title as string,
-          start_time: eventDetailsRaw.start_time as string,
-          end_time: eventDetailsRaw.end_time,
+          start_time: replaceRelativeDate(eventDetailsRaw.start_time) as string,
+          end_time: replaceRelativeDate(eventDetailsRaw.end_time),
           location: eventDetailsRaw.location,
           description: eventDetailsRaw.description,
           attendees: eventDetailsRaw.attendees,
@@ -113,8 +114,8 @@ export class AudioToCalendarController {
         const eventDetails: EventDetails = {
           event_id: eventDetailsRaw.event_id,
           title: eventDetailsRaw.title as string,
-          start_time: eventDetailsRaw.start_time as string,
-          end_time: eventDetailsRaw.end_time,
+          start_time: replaceRelativeDate(eventDetailsRaw.start_time) as string,
+          end_time: replaceRelativeDate(eventDetailsRaw.end_time),
           location: eventDetailsRaw.location,
           description: eventDetailsRaw.description,
           attendees: eventDetailsRaw.attendees,
@@ -226,7 +227,7 @@ export class AudioToCalendarController {
 
     logger.info('Generating event audio and deleting event', { 
       eventId, 
-      outputPath 
+      outputPath
     });
 
     try {
@@ -265,7 +266,7 @@ export class AudioToCalendarController {
         };
       }
 
-      // Log detailed time comparison for debugging
+      // Validate that event is currently occurring
       const nowMs = now.getTime();
       const startMs = eventStart.getTime();
       const endMs = eventEnd.getTime();
@@ -309,13 +310,20 @@ export class AudioToCalendarController {
         eventId
       });
 
-      const description = this.calendarService.formatEventDescription(event);
+      // Generate human-friendly reminder text using AI
+      logger.debug('Generating human-friendly reminder text');
+      const reminderText = await RetryService.retryOperation(
+        () => this.openaiService.generateHumanFriendlyReminderText(event),
+        maxRetries,
+        retryDelay
+      );
 
-      logger.debug('Generating audio description', { 
-        descriptionLength: description.length 
+      logger.debug('Generating audio from reminder text', { 
+        reminderTextLength: reminderText.length,
+        reminderText: reminderText.substring(0, 100) + (reminderText.length > 100 ? '...' : '')
       });
       const audioPath = await RetryService.retryOperation(
-        () => this.openaiService.generateAudioDescription(description, outputPath),
+        () => this.openaiService.generateAudioDescription(reminderText, outputPath),
         maxRetries,
         retryDelay
       );

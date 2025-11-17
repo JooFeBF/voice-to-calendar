@@ -1235,7 +1235,7 @@ size_t getOptimalBufferSize() {
 
 ### Manejador de Comando de Voz (Grabación Activada por Botón)
 
-**Nota**: Esta función se activa SOLO cuando el usuario presiona el botón (GPIO0). El sondeo en segundo plano para eventos pendientes ocurre por separado en el estado inactivo.
+**Nota**: Esta función se activa SOLO cuando el usuario presiona el botón (GPIO0). Graba audio, lo carga y lo procesa para crear/actualizar eventos de calendario. La generación de audio para eventos ocurre por separado cuando se sondea para eventos que están ocurriendo actualmente en el estado inactivo.
 
 ```cpp
 // Variables globales
@@ -1262,47 +1262,61 @@ void handleVoiceCommand() {
   
   // Paso 2: Cargar y obtener eventId
   Serial.println("Paso 2: Cargando audio...");
-  String eventId = uploadAudioAndGetEventId(audioBuffer, bytesRecorded);
+  String uploadEventId = uploadAudioAndGetEventId(audioBuffer, bytesRecorded);
   free(audioBuffer);
   
-  if (eventId.length() == 0) {
+  if (uploadEventId.length() == 0) {
     Serial.println("Carga fallida - sin eventId");
     setLED(false);
     return;
   }
   
-  Serial.printf("ID de Evento: %s\n", eventId.c_str());
-  currentEventId = eventId;
+  Serial.printf("ID de Evento de Carga: %s\n", uploadEventId.c_str());
   
-  // Paso 3: Activar procesamiento
-  Serial.println("Paso 3: Activando procesamiento de IA...");
-  if (!triggerProcessing(eventId)) {
-    Serial.println("Error al activar procesamiento");
+  // Paso 3: Procesar audio para crear/actualizar evento de calendario
+  Serial.println("Paso 3: Procesando audio para crear/actualizar evento de calendario...");
+  if (!processAudio(uploadEventId)) {
+    Serial.println("Procesamiento fallido");
     setLED(false);
     return;
   }
   
-  // Paso 4: Sondear para completar
-  Serial.println("Paso 4: Esperando procesamiento...");
-  blinkLED(3, 200); // Retroalimentación visual
-  
-  if (!pollForAudioReady(eventId, 60)) {
-    Serial.println("Timeout de procesamiento o error");
-    setLED(false);
-    return;
-  }
-  
-  // Paso 5: Reproducir respuesta
-  Serial.println("Paso 5: Reproduciendo respuesta de audio...");
-  if (playAudioResponse(eventId)) {
-    Serial.println("Reproducción iniciada exitosamente");
-    // LED se apagará cuando finalice la reproducción (en callback audio_eof)
-  } else {
-    Serial.println("Reproducción fallida");
-    setLED(false);
-  }
+  Serial.println("Evento creado/actualizado exitosamente. El audio se generará cuando el evento esté ocurriendo actualmente.");
+  Serial.println("El dispositivo sondeará automáticamente eventos que están ocurriendo en segundo plano.");
+  setLED(false);
   
   Serial.println("=== Comando de Voz Completo ===\n");
+}
+
+// Función auxiliar para procesar audio y crear/actualizar evento de calendario
+bool processAudio(const String& eventId) {
+  HTTPClient http;
+  String url = String("http://") + SERVER_HOST + ":" + SERVER_PORT + "/api/audio/process/" + eventId;
+  
+  http.begin(url);
+  http.setTimeout(30000); // Timeout de 30 segundos para procesamiento
+  
+  int httpCode = http.POST("");
+  
+  if (httpCode == 200) {
+    String response = http.getString();
+    http.end();
+    
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, response);
+    
+    if (!error && doc["success"]) {
+      Serial.println("Procesamiento exitoso");
+      if (doc.containsKey("calendarEventId")) {
+        Serial.printf("ID de Evento de Calendario: %s\n", doc["calendarEventId"].as<const char*>());
+      }
+      return true;
+    }
+  }
+  
+  Serial.printf("Procesamiento fallido: HTTP %d\n", httpCode);
+  http.end();
+  return false;
 }
 
 // Función auxiliar para grabar audio a buffer
@@ -1433,7 +1447,7 @@ void audio_bitrate(const char *info) {
 
 ### Monitoreo de Eventos en Segundo Plano
 
-Cuando el ESP32 está en el estado **INACTIVO** (no grabando o reproduciendo audio), sondea continuamente el servidor para eventos pendientes. Esto permite que el dispositivo reciba notificaciones de calendario, recordatorios u otros mensajes iniciados por el servidor sin interacción del usuario.
+Cuando el ESP32 está en el estado **INACTIVO** (no grabando o reproduciendo audio), sondea continuamente el servidor para verificar eventos de calendario que están ocurriendo actualmente. El servidor consulta Google Calendar para ver si algún evento está sucediendo ahora, y si es así, genera audio bajo demanda y lo devuelve. Esto permite que el dispositivo reproduzca automáticamente notificaciones de eventos cuando ocurren.
 
 **Puntos Clave**:
 - ✅ **Botón es Solo para Grabación**: El GPIO0 botón activa exclusivamente la grabación de audio
@@ -1472,20 +1486,24 @@ void loop() {
   delay(10);
 }
 
-// Verificar eventos iniciados por servidor
+// Verificar eventos que están ocurriendo actualmente
+// Esto sondea el servidor para verificar si algún evento de calendario está sucediendo ahora
+// Si un evento está ocurriendo, el servidor genera audio bajo demanda y lo devuelve
 void checkForPendingEvents() {
   HTTPClient http;
   
-  String url = String("http://") + SERVER_HOST + ":" + SERVER_PORT + "/api/events/pending";
+  // Sondear servidor para eventos de calendario que están ocurriendo actualmente
+  String url = String("http://") + SERVER_HOST + ":" + SERVER_PORT + "/api/events/current";
   
   http.begin(url);
-  http.setTimeout(5000); // Timeout rápido para sondeo en segundo plano
+  http.setTimeout(10000); // Timeout de 10 segundos (la generación de audio puede tomar tiempo)
   
   int httpCode = http.GET();
   
   if (httpCode == 200) {
     String response = http.getString();
     
+    // Analizar respuesta JSON
     StaticJsonDocument<512> doc;
     DeserializationError error = deserializeJson(doc, response);
     
@@ -1494,18 +1512,19 @@ void checkForPendingEvents() {
       
       if (hasPending) {
         String eventId = doc["eventId"].as<String>();
-        Serial.printf("[SONDEO INACTIVO] Evento pendiente: %s\n", eventId.c_str());
+        String title = doc["title"] | "Evento";
+        Serial.printf("[SONDEO INACTIVO] Evento ocurriendo actualmente encontrado: %s (%s)\n", title.c_str(), eventId.c_str());
         
-        // Reproducir notificación pendiente inmediatamente
+        // Reproducir audio para el evento que está ocurriendo actualmente
         currentEventId = eventId;
-        playAudioResponse(eventId);
+        if (playAudioResponse(eventId)) {
+          Serial.println("[SONDEO INACTIVO] Reproduciendo audio de notificación de evento");
+        }
       }
     }
-  } else {
-    // Fallo silencioso para sondeo en segundo plano (no spam de logs)
-    if (httpCode != -1) {  // Registrar solo errores reales, no timeouts
-      Serial.printf("[SONDEO INACTIVO] Error HTTP: %d\n", httpCode);
-    }
+  } else if (httpCode != -1) {
+    // Registrar solo errores reales, no timeouts
+    Serial.printf("[SONDEO INACTIVO] Error al verificar eventos actuales: HTTP %d\n", httpCode);
   }
   
   http.end();

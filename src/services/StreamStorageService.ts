@@ -2,10 +2,11 @@ import fs from 'fs';
 import path from 'path';
 
 interface AudioProcessingStatus {
-  status: 'processing' | 'ready' | 'error';
+  status: 'processing' | 'ready' | 'error' | 'no_action';
   audioPath?: string;
   error?: string;
   eventId?: string;
+  reason?: string;
 }
 
 export class StreamStorageService {

@@ -1299,7 +1299,7 @@ size_t getOptimalBufferSize() {
 
 ### Main Voice Command Handler (Button-Triggered Recording)
 
-**Note**: This function is triggered ONLY when the user presses the button (GPIO0). Background polling for pending events happens separately in the idle state.
+**Note**: This function is triggered ONLY when the user presses the button (GPIO0). It records audio, uploads it, and processes it to create/update calendar events. Audio generation for events happens separately when polling for currently occurring events in the idle state.
 
 ```cpp
 // Global variables
@@ -1326,47 +1326,61 @@ void handleVoiceCommand() {
   
   // Step 2: Upload and get eventId
   Serial.println("Step 2: Uploading audio...");
-  String eventId = uploadAudioAndGetEventId(audioBuffer, bytesRecorded);
+  String uploadEventId = uploadAudioAndGetEventId(audioBuffer, bytesRecorded);
   free(audioBuffer);
   
-  if (eventId.length() == 0) {
+  if (uploadEventId.length() == 0) {
     Serial.println("Upload failed - no eventId");
     setLED(false);
     return;
   }
   
-  Serial.printf("Event ID: %s\n", eventId.c_str());
-  currentEventId = eventId;
+  Serial.printf("Upload Event ID: %s\n", uploadEventId.c_str());
   
-  // Step 3: Trigger processing
-  Serial.println("Step 3: Triggering AI processing...");
-  if (!triggerProcessing(eventId)) {
-    Serial.println("Failed to trigger processing");
+  // Step 3: Process audio to create/update calendar event
+  Serial.println("Step 3: Processing audio to create/update calendar event...");
+  if (!processAudio(uploadEventId)) {
+    Serial.println("Processing failed");
     setLED(false);
     return;
   }
   
-  // Step 4: Poll for completion
-  Serial.println("Step 4: Waiting for processing...");
-  blinkLED(3, 200); // Visual feedback
-  
-  if (!pollForAudioReady(eventId, 60)) {
-    Serial.println("Processing timeout or error");
-    setLED(false);
-    return;
-  }
-  
-  // Step 5: Play response
-  Serial.println("Step 5: Playing audio response...");
-  if (playAudioResponse(eventId)) {
-    Serial.println("Playback started successfully");
-    // LED will turn off when playback finishes (in audio_eof callback)
-  } else {
-    Serial.println("Playback failed");
-    setLED(false);
-  }
+  Serial.println("Event created/updated successfully. Audio will be generated when event is currently occurring.");
+  Serial.println("The device will automatically poll for currently occurring events in the background.");
+  setLED(false);
   
   Serial.println("=== Voice Command Complete ===\n");
+}
+
+// Helper function to process audio and create/update calendar event
+bool processAudio(const String& eventId) {
+  HTTPClient http;
+  String url = String("http://") + SERVER_HOST + ":" + SERVER_PORT + "/api/audio/process/" + eventId;
+  
+  http.begin(url);
+  http.setTimeout(30000); // 30 second timeout for processing
+  
+  int httpCode = http.POST("");
+  
+  if (httpCode == 200) {
+    String response = http.getString();
+    http.end();
+    
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, response);
+    
+    if (!error && doc["success"]) {
+      Serial.println("Processing successful");
+      if (doc.containsKey("calendarEventId")) {
+        Serial.printf("Calendar Event ID: %s\n", doc["calendarEventId"].as<const char*>());
+      }
+      return true;
+    }
+  }
+  
+  Serial.printf("Processing failed: HTTP %d\n", httpCode);
+  http.end();
+  return false;
 }
 
 // Helper function to record audio to buffer
@@ -1424,15 +1438,17 @@ void loop() {
   delay(10);
 }
 
-// Function to check for pending events during idle
+// Function to check for currently occurring events during idle
+// This polls the server to check if any calendar events are happening right now
+// If an event is occurring, the server generates audio on-demand and returns it
 void checkForPendingEvents() {
-  // Poll server for any pending calendar events or notifications
   HTTPClient http;
   
-  String url = String("http://") + SERVER_HOST + ":" + SERVER_PORT + "/api/events/pending";
+  // Poll server for currently occurring calendar events
+  String url = String("http://") + SERVER_HOST + ":" + SERVER_PORT + "/api/events/current";
   
   http.begin(url);
-  http.setTimeout(5000); // 5 second timeout for quick polling
+  http.setTimeout(10000); // 10 second timeout (audio generation may take time)
   
   int httpCode = http.GET();
   
@@ -1448,15 +1464,19 @@ void checkForPendingEvents() {
       
       if (hasPending) {
         String eventId = doc["eventId"].as<String>();
-        Serial.printf("Pending event found: %s\n", eventId.c_str());
+        String title = doc["title"] | "Event";
+        Serial.printf("[IDLE POLL] Currently occurring event found: %s (%s)\n", title.c_str(), eventId.c_str());
         
-        // Trigger playback of pending event
+        // Play audio for the currently occurring event
         currentEventId = eventId;
         if (playAudioResponse(eventId)) {
-          Serial.println("Playing pending event notification");
+          Serial.println("[IDLE POLL] Playing event notification audio");
         }
       }
     }
+  } else if (httpCode != -1) {
+    // Log only real errors, not timeouts
+    Serial.printf("[IDLE POLL] Error checking for current events: HTTP %d\n", httpCode);
   }
   
   http.end();
@@ -1497,7 +1517,7 @@ void audio_bitrate(const char *info) {
 
 ### Background Event Monitoring
 
-When the ESP32 is in the **IDLE** state (not recording or playing audio), it continuously polls the server for pending events. This allows the device to receive calendar notifications, reminders, or other server-initiated messages without user interaction.
+When the ESP32 is in the **IDLE** state (not recording or playing audio), it continuously polls the server to check for currently occurring calendar events. The server queries Google Calendar to see if any events are happening right now, and if so, generates audio on-demand and returns it. This allows the device to automatically play event notifications when they occur.
 
 **Key Points**:
 - ✅ **Button is for Recording Only**: The GPIO0 button exclusively triggers audio recording
@@ -1536,14 +1556,15 @@ void loop() {
   delay(10);
 }
 
-// Check for server-initiated events
+// Check for currently occurring calendar events
+// The server checks Google Calendar and generates audio on-demand if an event is happening now
 void checkForPendingEvents() {
   HTTPClient http;
   
-  String url = String("http://") + SERVER_HOST + ":" + SERVER_PORT + "/api/events/pending";
+  String url = String("http://") + SERVER_HOST + ":" + SERVER_PORT + "/api/events/current";
   
   http.begin(url);
-  http.setTimeout(5000); // Quick timeout for background polling
+  http.setTimeout(10000); // 10 second timeout (audio generation may take time)
   
   int httpCode = http.GET();
   
@@ -1558,9 +1579,10 @@ void checkForPendingEvents() {
       
       if (hasPending) {
         String eventId = doc["eventId"].as<String>();
-        Serial.printf("[IDLE POLL] Pending event: %s\n", eventId.c_str());
+        String title = doc["title"] | "Event";
+        Serial.printf("[IDLE POLL] Currently occurring event: %s (%s)\n", title.c_str(), eventId.c_str());
         
-        // Play pending notification immediately
+        // Play audio for the currently occurring event
         currentEventId = eventId;
         playAudioResponse(eventId);
       }
@@ -2024,17 +2046,12 @@ void handleRecording() {
   if (recordAndUpload()) {
     Serial.println("[SUCCESS] Upload complete");
     
-    // Poll for response
-    Serial.println("[POLLING] Waiting for audio response...");
-    String eventId = pollForResponse();
-    
-    if (eventId.length() > 0) {
-      // Play response
-      Serial.println("[PLAYING] Audio response...");
-      playResponse(eventId);
-    } else {
-      Serial.println("[ERROR] No response received");
-    }
+    // Process audio to create/update calendar event
+    Serial.println("[PROCESSING] Creating/updating calendar event...");
+    // Note: You need to get the eventId from the upload response
+    // This is a simplified example - use the full handleVoiceCommand() function above
+    Serial.println("[SUCCESS] Event created/updated. Audio will be generated when event is currently occurring.");
+    Serial.println("[INFO] The device will automatically poll for currently occurring events in the background.");
   } else {
     Serial.println("[ERROR] Recording failed");
   }

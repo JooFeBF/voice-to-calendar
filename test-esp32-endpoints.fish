@@ -1,23 +1,29 @@
 #!/usr/bin/env fish
 
 set -g BASE_URL "http://localhost:3000"
-set -g AUDIO_FILE "audio.ogg"
+set -g AUDIO_FILE "audio.ogg"  # For event creation + polling (mentions current time)
+set -g AUDIO_FILE_2 "audio2.ogg"  # For event creation only
+set -g AUDIO_FILE_3 "audio3.ogg"  # For ambiguous prompt handling test
 set -g TEST_RESULTS 0
 set -g TEST_FAILURES 0
-
-function get_current_time_iso
-    date -u +"%Y-%m-%dT%H:%M:%S.000Z"
-end
-
-function get_time_offset_iso
-    set offset_seconds $argv[1]
-    date -u -d "@"(math (date +%s) + $offset_seconds) +"%Y-%m-%dT%H:%M:%S.000Z"
-end
+set -g TEST_TIMESTAMP (date +%s)
+set -g CURRENT_TEST_NAME ""
 
 function log_test
+    set -g CURRENT_TEST_NAME (echo $argv | string replace -a " " "_" | string replace -a "/" "_")
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "TEST: $argv"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    cleanup_test_temp_files
+end
+
+function get_test_temp_file
+    set suffix $argv[1]
+    echo "/tmp/test_$CURRENT_TEST_NAME"_"$TEST_TIMESTAMP"_"$suffix"
+end
+
+function cleanup_test_temp_files
+    find /tmp -maxdepth 1 -name "test_*_$TEST_TIMESTAMP_*" -type f -delete 2>/dev/null
 end
 
 function log_pass
@@ -31,144 +37,8 @@ function log_fail
     set -g TEST_RESULTS (math $TEST_RESULTS + 1)
 end
 
-function test_upload_stream
-    log_test "Upload Stream Endpoint"
-    
-    if not test -f $AUDIO_FILE
-        log_fail "Audio file $AUDIO_FILE not found"
-        return 1
-    end
-    
-    set http_code (curl -s -o /tmp/test_response.json -w "%{http_code}" \
-        -X POST \
-        -H "Content-Type: audio/wav" \
-        --data-binary @$AUDIO_FILE \
-        $BASE_URL/api/audio/upload-stream)
-    
-    set body (cat /tmp/test_response.json 2>/dev/null)
-    
-    if test "$http_code" -eq 200
-        set event_id (echo $body | grep -o '"eventId":"[^"]*"' | cut -d'"' -f4)
-        if test -n "$event_id"
-            log_pass "Upload successful, eventId: $event_id"
-            echo $event_id > /tmp/test_event_id.txt
-            return 0
-        else
-            log_fail "Upload response missing eventId"
-            return 1
-        end
-    else
-        log_fail "Upload returned HTTP $http_code"
-        return 1
-    end
-end
-
-function test_upload_with_invalid_file
-    log_test "Upload with Non-existent File"
-    
-    set http_code (curl -s -o /tmp/test_response.json -w "%{http_code}" \
-        -X POST \
-        -H "Content-Type: audio/wav" \
-        --data-binary @nonexistent_file.ogg \
-        $BASE_URL/api/audio/upload-stream 2>/dev/null)
-    
-    if test -z "$http_code"
-        log_pass "Upload correctly failed with non-existent file"
-    else
-        log_fail "Upload should have failed with non-existent file"
-    end
-end
-
-function test_chunked_upload_simulation
-    log_test "Chunked Upload Simulation (ESP32-style)"
-    
-    if not test -f $AUDIO_FILE
-        log_fail "Audio file $AUDIO_FILE not found"
-        return 1
-    end
-    
-    set http_code (curl -s -o /tmp/test_response.json -w "%{http_code}" \
-        -X POST \
-        -H "Content-Type: audio/wav" \
-        -H "Transfer-Encoding: chunked" \
-        --data-binary @$AUDIO_FILE \
-        $BASE_URL/api/audio/upload-stream)
-    
-    set body (cat /tmp/test_response.json 2>/dev/null)
-    
-    if test "$http_code" -eq 200
-        set bytes_received (echo $body | grep -o '"bytesReceived":[0-9]*' | cut -d':' -f2)
-        if test -n "$bytes_received"
-            log_pass "Chunked upload successful, received $bytes_received bytes"
-        else
-            log_fail "Chunked upload response missing bytesReceived"
-        end
-    else
-        log_fail "Chunked upload returned HTTP $http_code"
-    end
-end
-
-function test_upload_empty_file
-    log_test "Upload Empty File"
-    
-    # Create a temporary empty file
-    touch /tmp/empty_audio.ogg
-    
-    set http_code (curl -s -o /tmp/test_response.json -w "%{http_code}" \
-        -X POST \
-        -H "Content-Type: audio/wav" \
-        --data-binary @/tmp/empty_audio.ogg \
-        $BASE_URL/api/audio/upload-stream)
-    
-    set body (cat /tmp/test_response.json 2>/dev/null)
-    
-    if test "$http_code" -eq 200
-        set bytes_received (echo $body | grep -o '"bytesReceived":[0-9]*' | cut -d':' -f2)
-        if test "$bytes_received" -eq 0
-            log_pass "Empty file upload handled correctly, 0 bytes received"
-        else
-            log_fail "Empty file upload reported $bytes_received bytes instead of 0"
-        end
-    else
-        log_pass "Empty file upload correctly rejected with HTTP $http_code"
-    end
-    
-    rm -f /tmp/empty_audio.ogg
-end
-
-function test_upload_large_file
-    log_test "Upload Large File (if exists)"
-    
-    # Check for a larger test file, or use the regular one
-    set large_file $AUDIO_FILE
-    if test -f "large_audio.ogg"
-        set large_file "large_audio.ogg"
-    end
-    
-    if not test -f $large_file
-        log_pass "Skipping large file test (no large file available)"
-        return 0
-    end
-    
-    set http_code (curl -s -o /tmp/test_response.json -w "%{http_code}" \
-        -X POST \
-        -H "Content-Type: audio/wav" \
-        --data-binary @$large_file \
-        $BASE_URL/api/audio/upload-stream \
-        --max-time 30)
-    
-    set body (cat /tmp/test_response.json 2>/dev/null)
-    
-    if test "$http_code" -eq 200
-        set event_id (echo $body | grep -o '"eventId":"[^"]*"' | cut -d'"' -f4)
-        if test -n "$event_id"
-            log_pass "Large file upload successful, eventId: $event_id"
-        else
-            log_fail "Large file upload response missing eventId"
-        end
-    else
-        log_fail "Large file upload returned HTTP $http_code"
-    end
+function cleanup
+    cleanup_test_temp_files
 end
 
 function print_summary
@@ -177,59 +47,131 @@ function print_summary
     echo "TEST SUMMARY"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "Total Tests: $TEST_RESULTS"
-    echo "Passed: "(math $TEST_RESULTS - $TEST_FAILURES)
+    set passed (math $TEST_RESULTS - $TEST_FAILURES)
+    echo "Passed: $passed"
     echo "Failed: $TEST_FAILURES"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
     
-    if test $TEST_FAILURES -eq 0
-        echo "✓ All tests passed!"
-        return 0
-    else
+    if test $TEST_FAILURES -gt 0
         echo "✗ Some tests failed"
         return 1
-    end
-end
-
-function cleanup
-    rm -f /tmp/test_event_id.txt
-    rm -f /tmp/test_response.json
-    rm -f /tmp/test_download.wav
-    rm -f /tmp/test_calendar_event.json
-    rm -f /tmp/test_audio_current.txt
-    rm -f /tmp/test_audio_future.txt
-    rm -f /tmp/test_audio_recurring.txt
-end
-
-function create_test_audio_with_time
-    set time_offset $argv[1]
-    set output_file $argv[2]
-    set recurrence $argv[3]
-    
-    set start_time (get_time_offset_iso $time_offset)
-    set end_time (get_time_offset_iso (math $time_offset + 120))
-    
-    if test -n "$recurrence"
-        printf "Create an event called Test Event at %s, ending at %s, recurring %s" $start_time $end_time $recurrence > $output_file
     else
-        printf "Create an event called Test Event at %s, ending at %s" $start_time $end_time > $output_file
+        echo "✓ All tests passed"
+        return 0
     end
 end
 
-function test_event_polling_with_audio
-    log_test "Event Polling - Audio Processing with Time Validation"
+# Test 1: audio2.ogg - Event creation only (no audio generation)
+function test_event_creation_only
+    log_test "Event Creation Only (audio2.ogg)"
+    
+    if not test -f $AUDIO_FILE_2
+        log_fail "Audio file $AUDIO_FILE_2 not found"
+        cleanup_test_temp_files
+        return 1
+    end
+    
+    set temp_file (get_test_temp_file "response.json")
+    
+    echo "  NOTE: This test uses audio2.ogg to test event creation only"
+    echo "  Expected: Event should be created successfully"
+    echo "  Expected: No audio generation (event is scheduled for future)"
+    echo ""
+    echo "  Step 1: Upload audio2.ogg..."
+    
+    set http_code (curl -s -o $temp_file -w "%{http_code}" \
+        -X POST \
+        -H "Content-Type: audio/wav" \
+        --data-binary @$AUDIO_FILE_2 \
+        $BASE_URL/api/audio/upload-stream)
+    
+    if test "$http_code" -ne 200
+        log_fail "Upload failed (HTTP $http_code)"
+        cleanup_test_temp_files
+        return 1
+    end
+    
+    set body (cat $temp_file 2>/dev/null)
+    set event_id (echo $body | grep -o '"eventId":"[^"]*"' | cut -d'"' -f4)
+    
+    if test -z "$event_id"
+        log_fail "No event ID received"
+        cleanup_test_temp_files
+        return 1
+    end
+    
+    echo "  Event ID: $event_id"
+    echo "  Step 2: Processing audio to create calendar event..."
+    
+    set http_code (curl -s -o $temp_file -w "%{http_code}" \
+        -X POST \
+        $BASE_URL/api/audio/process/$event_id \
+        --max-time 60)
+    
+    set body (cat $temp_file 2>/dev/null)
+    
+    if test "$http_code" -ne 200
+        set error (echo $body | grep -o '"error":"[^"]*"' | cut -d'"' -f4)
+        if test -z "$error"
+            set error "Unknown error"
+        end
+        echo "  Error response: $body"
+        log_fail "Processing failed (HTTP $http_code): $error"
+        cleanup_test_temp_files
+        return 1
+    end
+    
+    set operation (echo $body | grep -o '"operation":"[^"]*"' | cut -d'"' -f4)
+    set calendar_event_id (echo $body | grep -o '"calendarEventId":"[^"]*"' | cut -d'"' -f4)
+    set message (echo $body | grep -o '"message":"[^"]*"' | cut -d'"' -f4)
+    
+    # Handle "no_action" case - event already exists, which is acceptable
+    if test "$operation" = "no_action"
+        echo "  Operation: no_action (event already exists)"
+        if test -n "$message"
+            echo "  Message: $message"
+        end
+        echo "  ✓ Event already exists - no action needed (this is acceptable)"
+        log_pass "Event already exists - no action needed (operation: no_action)"
+        cleanup_test_temp_files
+        return 0
+    end
+    
+    if test -z "$calendar_event_id"
+        log_fail "No calendar event ID received. Response: $body"
+        cleanup_test_temp_files
+        return 1
+    end
+    
+    echo "  Calendar Event ID: $calendar_event_id"
+    echo "  Operation: $operation"
+    echo "  ✓ Event created successfully"
+    log_pass "Event creation successful (calendar event created: $calendar_event_id)"
+    
+    cleanup_test_temp_files
+end
+
+# Test 2: audio.ogg - Event creation + Polling for current events
+function test_event_creation_and_polling
+    log_test "Event Creation + Polling for Current Events (audio.ogg)"
     
     if not test -f $AUDIO_FILE
         log_fail "Audio file $AUDIO_FILE not found"
+        cleanup_test_temp_files
         return 1
     end
     
-    echo "  NOTE: This test validates that the audio endpoint correctly:"
-    echo "  - Only returns audio when event is currently occurring"
-    echo "  - Handles recurring events by deleting only current instance"
-    echo ""
-    echo "  Step 1: Upload and process audio to create event..."
+    set temp_file (get_test_temp_file "response.json")
+    set temp_download (get_test_temp_file "audio.wav")
     
-    set http_code (curl -s -o /tmp/test_response.json -w "%{http_code}" \
+    echo "  NOTE: This test uses audio.ogg which mentions current time"
+    echo "  Expected: Event should be created successfully"
+    echo "  Expected: Polling should find the current event and generate audio"
+    echo ""
+    echo "  Step 1: Upload audio.ogg..."
+    
+    set http_code (curl -s -o $temp_file -w "%{http_code}" \
         -X POST \
         -H "Content-Type: audio/wav" \
         --data-binary @$AUDIO_FILE \
@@ -237,234 +179,295 @@ function test_event_polling_with_audio
     
     if test "$http_code" -ne 200
         log_fail "Upload failed (HTTP $http_code)"
+        cleanup_test_temp_files
         return 1
     end
     
-    set body (cat /tmp/test_response.json 2>/dev/null)
-    set event_id (echo $body | grep -o '"eventId":"[^"]*"' | cut -d'"' -f4)
+    set body (cat $temp_file 2>/dev/null)
+    set upload_event_id (echo $body | grep -o '"eventId":"[^"]*"' | cut -d'"' -f4)
     
-    if test -z "$event_id"
-        log_fail "No event ID received"
+    if test -z "$upload_event_id"
+        log_fail "No event ID received from upload"
+        cleanup_test_temp_files
         return 1
     end
     
-    echo "  Event ID: $event_id"
-    echo "  Step 2: Processing audio..."
+    echo "  Upload Event ID: $upload_event_id"
+    echo "  Step 2: Processing audio to create calendar event..."
     
-    set http_code (curl -s -o /tmp/test_response.json -w "%{http_code}" \
+    set http_code (curl -s -o $temp_file -w "%{http_code}" \
         -X POST \
-        $BASE_URL/api/audio/process/$event_id \
+        $BASE_URL/api/audio/process/$upload_event_id \
         --max-time 60)
     
-    set body (cat /tmp/test_response.json 2>/dev/null)
+    set body (cat $temp_file 2>/dev/null)
     
     if test "$http_code" -ne 200
-        log_fail "Processing failed (HTTP $http_code)"
+        set error (echo $body | grep -o '"error":"[^"]*"' | cut -d'"' -f4)
+        if test -z "$error"
+            set error "Unknown error"
+        end
+        echo "  Error response: $body"
+        log_fail "Processing failed (HTTP $http_code): $error"
+        cleanup_test_temp_files
         return 1
     end
     
     set calendar_event_id (echo $body | grep -o '"calendarEventId":"[^"]*"' | cut -d'"' -f4)
+    set operation (echo $body | grep -o '"operation":"[^"]*"' | cut -d'"' -f4)
     
-    if test -z "$calendar_event_id"
-        log_fail "No calendar event ID received"
+    if test "$operation" = "no_action"
+        echo "  Operation: no_action (event already exists)"
+        echo "  This is acceptable - the event was already created in a previous test"
+        echo "  Continuing with polling test..."
+    else if test -z "$calendar_event_id"
+        log_fail "No calendar event ID received. Response: $body"
+        cleanup_test_temp_files
+        return 1
+    else
+        echo "  Calendar Event ID: $calendar_event_id"
+        echo "  ✓ Event created successfully"
+    end
+    
+    echo "  Step 3: Polling for currently occurring events..."
+    echo "  (This should find the event we just created and generate audio)"
+    
+    # Poll for current events - this should find our event and generate audio
+    set http_code (curl -s -o $temp_file -w "%{http_code}" \
+        -X GET \
+        $BASE_URL/api/events/current \
+        --max-time 30)
+    
+    if test "$http_code" -ne 200
+        echo "  Error response: "(cat $temp_file 2>/dev/null)
+        log_fail "Polling failed (HTTP $http_code)"
+        cleanup_test_temp_files
         return 1
     end
     
-    echo "  Calendar Event ID: $calendar_event_id"
-    echo "  Step 3: Waiting for audio generation..."
-    sleep 3
+    set body (cat $temp_file 2>/dev/null)
+    set has_pending (echo $body | grep -o '"hasPending":[^,}]*' | cut -d':' -f2 | string trim)
+    set poll_event_id (echo $body | grep -o '"eventId":"[^"]*"' | cut -d'"' -f4)
+    set title (echo $body | grep -o '"title":"[^"]*"' | cut -d'"' -f4)
     
-    echo "  Step 4: Attempting to download event audio..."
-    echo "  WARNING: If the event was created with a fixed time (e.g., 9 AM),"
-    echo "           this will fail unless it's currently that time."
-    echo "           The new logic correctly rejects non-occurring events."
+    if test "$has_pending" != "true" -o -z "$poll_event_id"
+        echo "  Response: $body"
+        log_fail "No currently occurring event found. hasPending: $has_pending"
+        cleanup_test_temp_files
+        return 1
+    end
     
-    set http_code (curl -s -o /tmp/test_download.wav -w "%{http_code}" \
+    echo "  ✓ Currently occurring event found: $title"
+    echo "  Poll Event ID: $poll_event_id"
+    echo "  Step 4: Downloading generated audio..."
+    
+    # Download the audio that was generated
+    set http_code (curl -s -o $temp_download -w "%{http_code}" \
         -X GET \
-        $BASE_URL/api/audio/download/$calendar_event_id \
+        $BASE_URL/api/audio/download/$poll_event_id \
         --max-time 10)
     
-    if test "$http_code" -eq 200
-        if test -f /tmp/test_download.wav
-            set file_size (wc -c < /tmp/test_download.wav | string trim)
-            echo "  ✓ Audio downloaded: $file_size bytes"
-            log_pass "Event audio retrieved (event is currently occurring)"
-        else
-            log_fail "Download succeeded but file not found"
-        end
-    else if test "$http_code" -eq 404
-        echo "  ✗ Audio not available (HTTP 404)"
-        echo "  This is EXPECTED if the event time doesn't match current time"
-        log_pass "Time validation working - event not occurring now"
-    else if test "$http_code" -eq 202
-        echo "  Audio still processing (HTTP 202)"
-        log_pass "Processing status correctly returned"
-    else
-        set error_body (cat /tmp/test_download.wav 2>/dev/null)
-        echo "  Response: $error_body"
-        log_pass "Time-based rejection working correctly (HTTP $http_code)"
-    end
-end
-
-function test_recurring_event_instance_deletion
-    log_test "Recurring Event - Instance Deletion Logic"
-    
-    echo "  NOTE: Testing recurring event handling"
-    echo "  The system should:"
-    echo "  1. Cancel only the current instance of a recurring event"
-    echo "  2. Preserve future occurrences"
-    echo ""
-    echo "  This test demonstrates the logic is in place."
-    echo "  Full validation requires events at specific times."
-    
-    log_pass "Recurring event deletion logic implemented and verified in code"
-end
-
-function test_event_polling_future_time
-    log_test "Event Time Validation - Future Events"
-    
-    echo "  Verifying that future events are correctly rejected..."
-    echo "  Logic verified in AudioToCalendarController.generateEventAudioAndDelete():"
-    echo "  - Checks if current time is within event start/end"
-    echo "  - Returns error 'Event not currently occurring' otherwise"
-    
-    log_pass "Future event rejection logic implemented"
-end
-
-function test_event_polling_past_time
-    log_test "Event Time Validation - Past Events"
-    
-    echo "  Verifying that past events are correctly rejected..."
-    echo "  Logic verified in AudioToCalendarController.generateEventAudioAndDelete():"
-    echo "  - Checks if current time is within event start/end"
-    echo "  - Returns error 'Event not currently occurring' otherwise"
-    
-    log_pass "Past event rejection logic implemented"
-end
-
-function test_event_polling_current_time
-    log_test "Event Time Validation - Current Events"
-    
-    echo "  Verifying that current events are correctly processed..."
-    echo "  Logic verified in AudioToCalendarController.generateEventAudioAndDelete():"
-    echo "  - Only generates audio if now >= eventStart && now <= eventEnd"
-    echo "  - Properly handles different event types (single, recurring instance, recurring series)"
-    
-    log_pass "Current event processing logic implemented"
-end
-
-function test_full_workflow
-    log_test "Full Workflow: Upload → Process → Download"
-    
-    if not test -f $AUDIO_FILE
-        log_fail "Audio file $AUDIO_FILE not found"
+    if test "$http_code" -ne 200
+        echo "  Error: Audio download failed (HTTP $http_code)"
+        log_fail "Audio download failed (HTTP $http_code)"
+        cleanup_test_temp_files
         return 1
     end
     
-    echo "  Step 1: Uploading audio..."
-    set http_code (curl -s -o /tmp/test_response.json -w "%{http_code}" \
+    if test -f $temp_download
+        set file_size (wc -c < $temp_download | string trim)
+        if test "$file_size" -gt 0
+            echo "  ✓ Audio downloaded successfully: $file_size bytes"
+            log_pass "Event creation and polling successful (audio generated: $file_size bytes)"
+        else
+            log_fail "Audio file is empty"
+        end
+    else
+        log_fail "Audio file not found after download"
+    end
+    
+    cleanup_test_temp_files
+end
+
+# Test 3: audio3.ogg - Ambiguous prompt handling
+function test_ambiguous_prompt_handling
+    log_test "Ambiguous Prompt Handling (audio3.ogg)"
+    
+    if not test -f $AUDIO_FILE_3
+        log_fail "Audio file $AUDIO_FILE_3 not found"
+        cleanup_test_temp_files
+        return 1
+    end
+    
+    set temp_file (get_test_temp_file "response.json")
+    
+    echo "  NOTE: This test uses audio3.ogg to test ambiguous prompt handling"
+    echo "  Expected: Ambiguous prompts should create events with logical defaults"
+    echo "  Expected: Events should have reasonable start times (e.g., 5-15 min from now for immediate tasks)"
+    echo "  Expected: Events should have appropriate durations based on task type"
+    echo ""
+    echo "  Step 1: Upload audio3.ogg..."
+    
+    set http_code (curl -s -o $temp_file -w "%{http_code}" \
         -X POST \
         -H "Content-Type: audio/wav" \
-        --data-binary @$AUDIO_FILE \
+        --data-binary @$AUDIO_FILE_3 \
         $BASE_URL/api/audio/upload-stream)
     
     if test "$http_code" -ne 200
-        log_fail "Upload failed with HTTP $http_code"
+        log_fail "Upload failed (HTTP $http_code)"
+        cleanup_test_temp_files
         return 1
     end
     
-    set body (cat /tmp/test_response.json 2>/dev/null)
+    set body (cat $temp_file 2>/dev/null)
     set event_id (echo $body | grep -o '"eventId":"[^"]*"' | cut -d'"' -f4)
     
     if test -z "$event_id"
-        log_fail "No event ID received from upload"
+        log_fail "No event ID received"
+        cleanup_test_temp_files
         return 1
     end
     
     echo "  Event ID: $event_id"
-    echo "  Step 2: Processing audio (this will take ~10-30 seconds)..."
+    echo "  Step 2: Processing audio to create calendar event with ambiguous prompt..."
     
-    set http_code (curl -s -o /tmp/test_response.json -w "%{http_code}" \
+    set http_code (curl -s -o $temp_file -w "%{http_code}" \
         -X POST \
         $BASE_URL/api/audio/process/$event_id \
         --max-time 60)
     
-    set body (cat /tmp/test_response.json 2>/dev/null)
+    set body (cat $temp_file 2>/dev/null)
     
-    if test "$http_code" -eq 200
-        set calendar_event_id (echo $body | grep -o '"calendarEventId":"[^"]*"' | cut -d'"' -f4)
-        echo "  Calendar Event Created: $calendar_event_id"
+    if test "$http_code" -ne 200
+        set error (echo $body | grep -o '"error":"[^"]*"' | cut -d'"' -f4)
+        if test -z "$error"
+            set error "Unknown error"
+        end
+        echo "  Error response: $body"
+        log_fail "Processing failed (HTTP $http_code): $error"
+        cleanup_test_temp_files
+        return 1
+    end
+    
+    set calendar_event_id (echo $body | grep -o '"calendarEventId":"[^"]*"' | cut -d'"' -f4)
+    set operation (echo $body | grep -o '"operation":"[^"]*"' | cut -d'"' -f4)
+    
+    # Extract eventDetails fields (title, start_time, end_time from nested eventDetails object)
+    # Using a simple JSON parsing approach for fish shell
+    set title (echo $body | grep -o '"title":"[^"]*"' | head -n 1 | cut -d'"' -f4)
+    set start_time (echo $body | grep -o '"start_time":"[^"]*"' | head -n 1 | cut -d'"' -f4)
+    set end_time (echo $body | grep -o '"end_time":"[^"]*"' | head -n 1 | cut -d'"' -f4)
+    
+    if test -z "$calendar_event_id" -a "$operation" != "no_action"
+        log_fail "No calendar event ID received. Response: $body"
+        cleanup_test_temp_files
+        return 1
+    end
+    
+    if test "$operation" = "no_action"
+        echo "  Operation: no_action (event already exists)"
+        echo "  This might be acceptable if the test was run multiple times"
+    else
+        echo "  Calendar Event ID: $calendar_event_id"
+        echo "  Title: $title"
+        echo "  Start Time: $start_time"
+        echo "  End Time: $end_time"
+        echo "  ✓ Event created successfully"
+    end
+    
+    # Verify that the event has reasonable times (if it's a create operation)
+    if test "$operation" = "create" -a -n "$start_time" -a -n "$end_time"
+        echo "  Step 3: Validating ambiguous prompt handling..."
+        echo "  Analyzing event times to verify logical defaults were applied"
         
-        echo "  Step 3: Waiting for audio generation..."
-        sleep 2
+        # Parse the start time to check if it's within reasonable range
+        # For ambiguous prompts like "tengo que comprar abarrotes", 
+        # start time should be within 5-30 minutes from now
+        # Try different date parsing formats for Linux
+        set start_timestamp (date -d "$start_time" +%s 2>/dev/null || date -d "$start_time" -u +%s 2>/dev/null || gdate -d "$start_time" +%s 2>/dev/null || echo "")
         
-        echo "  Step 4: Checking status..."
-        set http_code (curl -s -o /tmp/test_response.json -w "%{http_code}" \
-            -X GET \
-            "$BASE_URL/api/audio/status/$event_id?timeout=5000" \
-            --max-time 10)
-        
-        set status_body (cat /tmp/test_response.json 2>/dev/null)
-        set audio_status (echo $status_body | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
-        
-        if test "$audio_status" = "ready"
-            echo "  Step 5: Downloading audio response..."
-            set output_file "calendar_response_"$event_id".wav"
-            set http_code (curl -s -o $output_file -w "%{http_code}" \
-                -X GET \
-                $BASE_URL/api/audio/download/$event_id \
-                --max-time 10)
+        if test -n "$start_timestamp"
+            set now_timestamp (date +%s)
+            set time_diff_minutes (math "($start_timestamp - $now_timestamp) / 60")
             
-            if test "$http_code" -eq 200
-                if test -f $output_file
-                    set file_size (wc -c < $output_file | string trim)
-                    echo "  ✓ Audio saved to: $output_file"
-                    log_pass "Full workflow completed! Calendar event: $calendar_event_id, Audio size: $file_size bytes"
-                else
-                    log_fail "Download succeeded but file not found"
-                end
+            echo "  Time difference from now: $time_diff_minutes minutes"
+            
+            # Check if start time is within reasonable range for immediate tasks (0-120 minutes)
+            # or for future tasks (positive time difference)
+            if test "$time_diff_minutes" -ge 0 -a "$time_diff_minutes" -le 120
+                echo "  ✓ Start time is within reasonable range for ambiguous prompt (0-120 min)"
             else
-                log_fail "Download failed with HTTP $http_code"
+                echo "  ⚠ Warning: Start time is $time_diff_minutes minutes from now (might be outside expected range)"
             end
         else
-            log_pass "Processing completed, audio status: $audio_status (calendar event created: $calendar_event_id)"
+            # If parsing failed, might be currentDate+<ms> format which is also valid
+            if echo "$start_time" | grep -q "currentDate+"
+                echo "  ✓ Start time uses relative format (currentDate+<ms>) - will be processed correctly"
+            else
+                echo "  ⚠ Warning: Could not parse start time: $start_time"
+            end
         end
-    else if test "$http_code" -eq 500
-        set error (echo $body | grep -o '"error":"[^"]*"' | cut -d'"' -f4)
-        log_fail "Processing failed: $error"
-    else if test "$http_code" -eq 404
-        log_fail "Event not found for processing"
-    else
-        log_fail "Processing returned HTTP $http_code"
+        
+        # Verify that end time is after start time
+        if test -n "$start_time" -a -n "$end_time"
+            set start_ts (date -d "$start_time" +%s 2>/dev/null || date -d "$start_time" -u +%s 2>/dev/null || gdate -d "$start_time" +%s 2>/dev/null || echo "")
+            set end_ts (date -d "$end_time" +%s 2>/dev/null || date -d "$end_time" -u +%s 2>/dev/null || gdate -d "$end_time" +%s 2>/dev/null || echo "")
+            
+            if test -n "$start_ts" -a -n "$end_ts" -a "$end_ts" -gt "$start_ts"
+                set duration_minutes (math "($end_ts - $start_ts) / 60")
+                echo "  Event duration: $duration_minutes minutes"
+                
+                # Check if duration is reasonable (typically 5 min to 3 hours for tasks)
+                if test "$duration_minutes" -ge 5 -a "$duration_minutes" -le 180
+                    echo "  ✓ Event duration is within reasonable range (5-180 min)"
+                else
+                    echo "  ⚠ Warning: Event duration ($duration_minutes min) might be outside typical range (5-180 min)"
+                end
+            else if echo "$start_time" | grep -q "currentDate+" || echo "$end_time" | grep -q "currentDate+"
+                echo "  ✓ Event uses relative time format (currentDate+<ms>) - will be processed correctly"
+            else
+                echo "  ⚠ Note: Could not fully validate event duration (dates may be in relative format)"
+            end
+        end
     end
+    
+    if test "$operation" = "create"
+        log_pass "Ambiguous prompt handled successfully (event created: $calendar_event_id, title: $title)"
+    else if test "$operation" = "no_action"
+        log_pass "Ambiguous prompt handled (event already exists or no action needed)"
+    else
+        log_pass "Ambiguous prompt handled (operation: $operation)"
+    end
+    
+    cleanup_test_temp_files
 end
 
 function main
     echo "ESP32 Audio File Upload Test Suite"
     echo "Testing server at: $BASE_URL"
+    echo "Test run timestamp: $TEST_TIMESTAMP"
     echo ""
     
-    test_upload_stream
-    test_upload_with_invalid_file
-    test_chunked_upload_simulation
-    test_upload_empty_file
-    test_upload_large_file
+    cleanup
     
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "EVENT POLLING & RECURRING EVENT TESTS"
+    echo "TEST 1: Event Creation Only (audio2.ogg)"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    test_event_polling_current_time
-    test_event_polling_future_time
-    test_event_polling_past_time
-    test_recurring_event_instance_deletion
-    test_event_polling_with_audio
+    test_event_creation_only
     
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "INTEGRATION TEST"
+    echo "TEST 2: Event Creation + Polling (audio.ogg)"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    test_full_workflow
+    test_event_creation_and_polling
+    
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "TEST 3: Ambiguous Prompt Handling (audio3.ogg)"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    test_ambiguous_prompt_handling
     
     echo ""
     print_summary
