@@ -1,4 +1,4 @@
-import { OpenAIService, CalendarService, RetryService } from '../services';
+import { OpenAIService, CalendarService, RetryService, EventProcessingLock } from '../services';
 import { PipelineOptions, PipelineResult, EventDetails } from '../models';
 import { AuthClient } from 'google-auth-library';
 import { calendar_v3 } from 'googleapis';
@@ -14,9 +14,11 @@ export class AudioToCalendarController {
     googleAuth: AuthClient, 
     calendarEmail: string,
     audioInputFormat: string,
-    audioOutputFormat: string
+    audioOutputFormat: string,
+    ttsVoice: string = 'alloy',
+    ttsSpeed: number = 1.0
   ) {
-    this.openaiService = new OpenAIService(openaiKey, audioInputFormat, audioOutputFormat);
+    this.openaiService = new OpenAIService(openaiKey, audioInputFormat, audioOutputFormat, ttsVoice, ttsSpeed);
     this.calendarService = new CalendarService(googleAuth, calendarEmail);
   }
 
@@ -230,6 +232,16 @@ export class AudioToCalendarController {
       outputPath
     });
 
+    // Acquire lock to prevent concurrent processing of the same event
+    const lockAcquired = EventProcessingLock.acquireLock(eventId);
+    if (!lockAcquired) {
+      logger.info('Event is already being processed by another request, skipping', { eventId });
+      return {
+        success: false,
+        error: 'Event is already being processed'
+      };
+    }
+
     try {
       logger.debug('Retrieving calendar event');
       const event = await RetryService.retryOperation(
@@ -377,6 +389,9 @@ export class AudioToCalendarController {
         success: false,
         error: error instanceof Error ? error.message : String(error)
       };
+    } finally {
+      // Always release the lock, even if there was an error
+      EventProcessingLock.releaseLock(eventId);
     }
   }
 }

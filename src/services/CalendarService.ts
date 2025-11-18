@@ -316,6 +316,24 @@ export class CalendarService {
     logger.info('Deleting calendar event', { eventId });
 
     try {
+      // First check if the event still exists to avoid unnecessary API calls
+      try {
+        await this.calendar.events.get({
+          calendarId: this.calendarId,
+          eventId
+        });
+      } catch (getError: any) {
+        // If event doesn't exist or is already deleted, treat as success (idempotent)
+        if (getError.message?.includes('Resource has been deleted') || 
+            getError.message?.includes('Not Found') ||
+            getError.code === 404) {
+          logger.info('Event already deleted, treating as success', { eventId });
+          return;
+        }
+        // Re-throw if it's a different error
+        throw getError;
+      }
+
       await this.calendar.events.delete({
         calendarId: this.calendarId,
         eventId,
@@ -323,7 +341,18 @@ export class CalendarService {
       });
 
       logger.info('Calendar event deleted successfully', { eventId });
-    } catch (error) {
+    } catch (error: any) {
+      // Handle "Resource has been deleted" error gracefully - this can happen
+      // in race conditions when multiple requests try to delete the same event
+      if (error.message?.includes('Resource has been deleted') || 
+          error.message?.includes('Not Found') ||
+          error.code === 404) {
+        logger.info('Event was already deleted (likely by concurrent request), treating as success', { 
+          eventId 
+        });
+        return;
+      }
+
       logger.error('Google Calendar API error while deleting event', {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
@@ -342,6 +371,12 @@ export class CalendarService {
         eventId: instanceId
       });
 
+      // Check if already cancelled
+      if (event.data.status === 'cancelled') {
+        logger.info('Event instance already cancelled, treating as success', { instanceId });
+        return;
+      }
+
       event.data.status = 'cancelled';
 
       await this.calendar.events.update({
@@ -352,7 +387,17 @@ export class CalendarService {
       });
 
       logger.info('Calendar event instance cancelled successfully', { instanceId });
-    } catch (error) {
+    } catch (error: any) {
+      // Handle "Resource has been deleted" or "Not Found" errors gracefully
+      if (error.message?.includes('Resource has been deleted') || 
+          error.message?.includes('Not Found') ||
+          error.code === 404) {
+        logger.info('Event instance was already deleted/cancelled (likely by concurrent request), treating as success', { 
+          instanceId 
+        });
+        return;
+      }
+
       logger.error('Google Calendar API error while cancelling event instance', {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
@@ -387,7 +432,20 @@ export class CalendarService {
       });
 
       if (!targetInstance || !targetInstance.id) {
-        throw new Error('Could not find the target instance to cancel');
+        // Check if it might have been already cancelled/deleted
+        logger.info('Target instance not found, may have been already cancelled/deleted', { 
+          seriesId,
+          instanceStartTime: instanceStartTime.toISOString()
+        });
+        return;
+      }
+
+      // Check if already cancelled
+      if (targetInstance.status === 'cancelled') {
+        logger.info('Recurring instance already cancelled, treating as success', { 
+          instanceId: targetInstance.id 
+        });
+        return;
       }
 
       targetInstance.status = 'cancelled';
@@ -402,7 +460,18 @@ export class CalendarService {
       logger.info('Current instance of recurring series cancelled successfully', { 
         instanceId: targetInstance.id 
       });
-    } catch (error) {
+    } catch (error: any) {
+      // Handle "Resource has been deleted" or "Not Found" errors gracefully
+      if (error.message?.includes('Resource has been deleted') || 
+          error.message?.includes('Not Found') ||
+          error.code === 404) {
+        logger.info('Recurring instance was already deleted/cancelled (likely by concurrent request), treating as success', { 
+          seriesId,
+          instanceStartTime: instanceStartTime.toISOString()
+        });
+        return;
+      }
+
       logger.error('Google Calendar API error while cancelling recurring instance', {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,

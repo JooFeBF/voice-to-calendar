@@ -25,7 +25,9 @@ async function main(): Promise<void> {
     auth, 
     config.calendarEmail,
     config.audioInputFormat,
-    config.audioOutputFormat
+    config.audioOutputFormat,
+    config.ttsVoice,
+    config.ttsSpeed
   );
 
   const result = await controller.processAudioFile(config.audioFilePath);
@@ -41,7 +43,9 @@ export async function generateEventAudio(eventId: string, outputPath: string): P
     auth, 
     config.calendarEmail,
     config.audioInputFormat,
-    config.audioOutputFormat
+    config.audioOutputFormat,
+    config.ttsVoice,
+    config.ttsSpeed
   );
 
   return await controller.generateEventAudioAndDelete(eventId, outputPath);

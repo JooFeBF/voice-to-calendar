@@ -10,6 +10,8 @@ export interface Config {
   tempStorageDir: string;
   statusPollTimeout: number;
   maxUploadSize: string;
+  ttsVoice: string;
+  ttsSpeed: number;
 }
 
 export function getConfig(): Config {
@@ -24,6 +26,8 @@ export function getConfig(): Config {
   const tempStorageDir = process.env.TEMP_STORAGE_DIR || './temp';
   const statusPollTimeout = parseInt(process.env.STATUS_POLL_TIMEOUT || '30000', 10);
   const maxUploadSize = process.env.MAX_UPLOAD_SIZE || '50mb';
+  const ttsVoice = process.env.TTS_VOICE || 'alloy';
+  const ttsSpeed = parseFloat(process.env.TTS_SPEED || '1.0');
 
   if (!openaiApiKey) {
     throw new Error('OPENAI_API_KEY environment variable is required');
@@ -44,6 +48,8 @@ export function getConfig(): Config {
     serverHost,
     tempStorageDir,
     statusPollTimeout,
-    maxUploadSize
+    maxUploadSize,
+    ttsVoice,
+    ttsSpeed
   };
 }

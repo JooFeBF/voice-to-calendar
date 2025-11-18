@@ -21,11 +21,21 @@ export class OpenAIService {
   private client: OpenAI;
   private audioInputFormat: string;
   private audioOutputFormat: string;
+  private ttsVoice: string;
+  private ttsSpeed: number;
 
-  constructor(apiKey: string, audioInputFormat: string, audioOutputFormat: string) {
+  constructor(
+    apiKey: string, 
+    audioInputFormat: string, 
+    audioOutputFormat: string,
+    ttsVoice: string = 'alloy',
+    ttsSpeed: number = 1.0
+  ) {
     this.client = new OpenAI({ apiKey });
     this.audioInputFormat = audioInputFormat;
     this.audioOutputFormat = audioOutputFormat;
+    this.ttsVoice = ttsVoice;
+    this.ttsSpeed = ttsSpeed;
     this.validateAudioFormats();
   }
 
@@ -148,22 +158,32 @@ REGLAS IMPORTANTES:
    - NO uses estructuras como "Evento: ...", "Hora: ...", etc.
    - Sé breve (1-2 frases máximo)
    - En segunda persona (tú)
+   - IMPORTANTE: Usa puntuación adecuada (comas, puntos) para pausas naturales
+   - Asegúrate de que el mensaje termine con punto final
+   - CRÍTICO PARA CLARIDAD: Escribe todos los números en palabras (tres, diez, doce) en lugar de dígitos (3, 10, 12)
+     Esto mejora significativamente la pronunciación y claridad en sistemas de texto a voz
 
 3. CUANDO INCLUIR HORAS:
    - Solo si es algo que requiere asistir a un lugar o reunión
    - Formato: "desde las [hora inicio] hasta las [hora fin]"
-   - Usa formato de 12 horas (ej: "3:00 PM", "10:30 AM")
+   - IMPORTANTE: Usa formato natural en español para las horas, escribiendo los números en palabras:
+     * "las tres de la tarde" o "las tres en punto de la tarde" (no "3:00 PM" ni "las 3:00")
+     * "las diez y media de la mañana" (no "10:30 AM" ni "las 10:30")
+     * "mediodía" para las 12:00 PM
+     * "medianoche" para las 12:00 AM
+     * Para minutos: "y cuarto" (15), "y media" (30), "menos cuarto" (45), o "y [número]" para otros minutos
+     * Ejemplos: "las tres de la tarde", "las diez y media de la mañana", "las seis de la tarde", "las dos y cuarto de la tarde"
 
 4. CUANDO NO INCLUIR HORAS:
    - Si es algo que debe hacer inmediatamente
    - Dile que lo haga "ahora" o "ya"
 
 Ejemplos de mensajes correctos:
-- "Te recuerdo que tienes que tomarte una pastilla ahora"
-- "Te recuerdo que tienes una reunión de trabajo desde las 3:00 PM hasta las 4:30 PM"
-- "No olvides que tienes cita médica desde las 10:00 AM hasta las 11:00 AM"
-- "Recuerda que tienes que llamar a tu mamá ahora"
-- "Te recuerdo que tienes clase de yoga desde las 6:00 PM hasta las 7:00 PM"`
+- "Te recuerdo que tienes que tomarte una pastilla ahora."
+- "Te recuerdo que tienes una reunión de trabajo desde las tres de la tarde hasta las cuatro y media de la tarde."
+- "No olvides que tienes cita médica desde las diez de la mañana hasta las once de la mañana."
+- "Recuerda que tienes que llamar a tu mamá ahora."
+- "Te recuerdo que tienes clase de yoga desde las seis de la tarde hasta las siete de la tarde."`
 
           },
           {
@@ -210,10 +230,70 @@ Analiza el contenido y decide si necesita incluir las horas o no. Genera un mens
   }
 
   /**
+   * Normalizes Spanish text for optimal TTS pronunciation and naturalness.
+   * Based on best practices for Spanish TTS:
+   * - Ensures proper punctuation for natural pauses
+   * - Normalizes spacing around punctuation
+   * - Adds commas for natural breathing points after common phrases
+   * - Ensures proper capitalization
+   * - Normalizes common Spanish abbreviations
+   * - Handles Spanish-specific punctuation and spacing
+   * 
+   * Note: Time format normalization is handled by the AI prompt, not here.
+   * 
+   * @param text - Spanish text to normalize
+   * @returns Normalized text optimized for TTS
+   */
+  private normalizeSpanishTextForTTS(text: string): string {
+    let normalized = text.trim();
+    
+    // Normalize common Spanish abbreviations for better pronunciation
+    normalized = normalized.replace(/\bDr\./gi, 'doctor');
+    normalized = normalized.replace(/\bDra\./gi, 'doctora');
+    normalized = normalized.replace(/\bSr\./gi, 'señor');
+    normalized = normalized.replace(/\bSra\./gi, 'señora');
+    normalized = normalized.replace(/\bSrta\./gi, 'señorita');
+    normalized = normalized.replace(/\bProf\./gi, 'profesor');
+    normalized = normalized.replace(/\bProfa\./gi, 'profesora');
+    
+    // Normalize multiple spaces to single space
+    normalized = normalized.replace(/\s+/g, ' ');
+    
+    // Ensure proper spacing around punctuation (but not before commas/periods)
+    normalized = normalized.replace(/\s*([.,!?;:])\s*/g, '$1 ');
+    normalized = normalized.replace(/\s+/g, ' ');
+    
+    // Add natural pauses after common Spanish phrases for better rhythm
+    // This helps with natural intonation in Spanish
+    normalized = normalized.replace(/(Te recuerdo que|No olvides que|Recuerda que)(\s+)/gi, '$1, ');
+    
+    // Ensure proper spacing around Spanish-specific punctuation
+    normalized = normalized.replace(/\s*([¿¡])\s*/g, '$1 ');
+    normalized = normalized.replace(/\s*([?!])\s*/g, '$1 ');
+    
+    // Normalize spacing around parentheses for better pronunciation
+    normalized = normalized.replace(/\s*\(\s*/g, ' (');
+    normalized = normalized.replace(/\s*\)\s*/g, ') ');
+    
+    // Ensure the text ends with proper punctuation if it doesn't
+    if (!/[.!?]$/.test(normalized)) {
+      normalized += '.';
+    }
+    
+    // Ensure proper capitalization at the start
+    normalized = normalized.charAt(0).toUpperCase() + normalized.slice(1);
+    
+    return normalized.trim();
+  }
+
+  /**
    * Generates audio from a natural, conversational message.
-   * This method should ONLY receive natural messages (e.g., "Te recuerdo que tienes que tomarte una pastilla ahora")
-   * and NOT structured messages (e.g., "Evento: ... Hora: ...").
-   * The text is passed directly to TTS without any modification or structure.
+   * This method applies Spanish TTS best practices for optimal naturalness and clarity:
+   * - Uses gpt-4o-mini-tts model with voice instructions for better Spanish accent
+   * - Normalizes text for proper Spanish pronunciation
+   * - Uses configurable speed (default 1.0) for natural speech
+   * - Uses configurable voice (default 'alloy') optimized for Spanish
+   * - Includes explicit instructions for natural Spanish accent and pronunciation
    * 
    * @param text - Natural, conversational message to convert to audio
    * @param outputPath - Path where the audio file will be saved
@@ -223,7 +303,9 @@ Analiza el contenido y decide si necesita incluir las horas o no. Genera un mens
     logger.info('Starting TTS audio generation', { 
       outputPath,
       textLength: text.length,
-      textPreview: text.substring(0, 100) + (text.length > 100 ? '...' : '')
+      textPreview: text.substring(0, 100) + (text.length > 100 ? '...' : ''),
+      voice: this.ttsVoice,
+      speed: this.ttsSpeed
     });
     const startTime = Date.now();
 
@@ -232,11 +314,26 @@ Analiza el contenido y decide si necesita incluir las horas o no. Genera un mens
       : this.audioOutputFormat;
 
     try {
-      // Pass the natural message directly to TTS - no modification or structure added
+      // Normalize Spanish text for optimal TTS pronunciation
+      const normalizedText = this.normalizeSpanishTextForTTS(text);
+      
+      logger.info('Text normalized for Spanish TTS', {
+        originalLength: text.length,
+        normalizedLength: normalizedText.length,
+        normalizedPreview: normalizedText.substring(0, 100) + (normalizedText.length > 100 ? '...' : '')
+      });
+
+      // Use gpt-4o-mini-tts with optimized parameters for Spanish:
+      // - model: 'gpt-4o-mini-tts' (supports instructions parameter for accent control)
+      // - voice: configurable (default 'alloy', well-suited for Spanish)
+      // - speed: configurable (default 1.0 for natural speech)
+      // - instructions: explicit guidance for natural Spanish accent and pronunciation
       const speechResponse = await this.client.audio.speech.create({
-        model: 'tts-1',
-        voice: 'nova',
-        input: text,
+        model: 'gpt-4o-mini-tts',
+        voice: this.ttsVoice as 'alloy' | 'ash' | 'ballad' | 'coral' | 'echo' | 'fable' | 'onyx' | 'nova' | 'sage' | 'shimmer' | 'verse',
+        input: normalizedText,
+        speed: this.ttsSpeed,
+        instructions: 'Habla con un acento español natural e hispanoamericano. Pronuncia todas las palabras en español con claridad y naturalidad. Usa entonación natural del español, no del inglés. Asegúrate de que todas las palabras se pronuncien correctamente en español.',
         response_format: formatWithoutDot as 'mp3' | 'opus' | 'aac' | 'flac' | 'wav' | 'pcm'
       });
 
@@ -292,7 +389,12 @@ Fecha actual: ${new Date().toISOString()}${eventsContext}
 
 REGLAS IMPORTANTES:
 1. SIEMPRE debes llamar a una función - NO respondas con texto conversacional
-2. Si un evento IDÉNTICO ya existe (mismo título, hora y recurrencia), usa no_action_needed
+2. DETECCIÓN DE EVENTOS DUPLICADOS - CRÍTICO:
+   - Si el usuario solicita crear un evento que es EXACTAMENTE IGUAL a uno que ya existe (mismo título, misma hora, mismos detalles), DEBES usar no_action_needed y NO crear un nuevo evento
+   - Ejemplo: Si el usuario dice "Me tengo que tomar una pasta a las 2" y ya existe un evento con ese título y hora, y luego dice de nuevo "Me tengo que tomar una pasta a las 2", NO hagas nada (usa no_action_needed)
+   - SOLO crea un nuevo evento si hay una DIFERENCIA SIGNIFICATIVA en la solicitud
+   - Ejemplo: Si el usuario dice "Me tengo que tomar una pasta a las 2" y luego dice "Me tengo que tomar una pasta azul a las 2", esto es DIFERENTE (agregó "azul"), así que SÍ crea un nuevo evento
+   - Compara cuidadosamente: título, hora, descripción, ubicación - si todos son iguales, es un duplicado
 3. Si el evento es similar pero no idéntico, créalo de todos modos
 4. Para eventos recurrentes, usa formato RRULE (RFC5545)
 

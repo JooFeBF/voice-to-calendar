@@ -48,7 +48,9 @@ async function startServer(): Promise<void> {
     auth,
     config.calendarEmail,
     config.audioInputFormat,
-    config.audioOutputFormat
+    config.audioOutputFormat,
+    config.ttsVoice,
+    config.ttsSpeed
   );
 
   const storageService = new StreamStorageService(
@@ -62,6 +64,18 @@ async function startServer(): Promise<void> {
     audioInputFormat: config.audioInputFormat,
     audioOutputFormat: config.audioOutputFormat,
     calendarEmail: config.calendarEmail
+  });
+
+  // Enable CORS for frontend
+  app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+    if (req.method === 'OPTIONS') {
+      res.sendStatus(200);
+    } else {
+      next();
+    }
   });
 
   app.use(express.json({ limit: config.maxUploadSize }));
@@ -78,26 +92,69 @@ async function startServer(): Promise<void> {
 
   // Endpoint to poll for currently occurring events and generate audio on-demand
   app.get('/api/events/current', async (req: Request, res: Response, next: NextFunction) => {
-    logger.info('Checking for currently occurring events');
+    const requestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    logger.info('Checking for currently occurring events', { requestId });
 
     try {
       const now = new Date();
       const timeMin = now.toISOString();
       const timeMax = new Date(now.getTime() + 60 * 60 * 1000).toISOString(); // 1 hour window
 
+      logger.info('Querying calendar for events', {
+        requestId,
+        timeMin,
+        timeMax,
+        now: now.toISOString()
+      });
+
       // Get events from calendar that are currently occurring
       const events = await controller.calendarService.listEvents(timeMin, timeMax, 10);
 
+      logger.info('Retrieved events from calendar', {
+        requestId,
+        totalEvents: events.length,
+        eventIds: events.map(e => e.id).slice(0, 5),
+        eventTitles: events.map(e => e.summary || 'No title').slice(0, 5)
+      });
+
       // Filter for events that are currently occurring (now >= start && now <= end)
       const currentEvents = events.filter(event => {
-        if (!event.start?.dateTime || !event.end?.dateTime) return false;
+        if (!event.start?.dateTime || !event.end?.dateTime) {
+          logger.info('Event missing start/end time - filtering out', {
+            requestId,
+            eventId: event.id,
+            title: event.summary,
+            hasStart: !!event.start?.dateTime,
+            hasEnd: !!event.end?.dateTime,
+            hasStartDate: !!event.start?.date,
+            hasEndDate: !!event.end?.date,
+            startType: event.start?.dateTime ? 'dateTime' : event.start?.date ? 'date' : 'none',
+            endType: event.end?.dateTime ? 'dateTime' : event.end?.date ? 'date' : 'none'
+          });
+          return false;
+        }
         const eventStart = new Date(event.start.dateTime);
         const eventEnd = new Date(event.end.dateTime);
-        return now >= eventStart && now <= eventEnd;
+        const isCurrentlyOccurring = now >= eventStart && now <= eventEnd;
+        
+        logger.info('Event time check', {
+          requestId,
+          eventId: event.id,
+          title: event.summary,
+          eventStart: eventStart.toISOString(),
+          eventEnd: eventEnd.toISOString(),
+          now: now.toISOString(),
+          isCurrentlyOccurring,
+          isRecurring: !!(event.recurrence || event.recurringEventId),
+          timeDiffFromStart: (now.getTime() - eventStart.getTime()) / 1000 / 60, // minutes
+          timeDiffFromEnd: (now.getTime() - eventEnd.getTime()) / 1000 / 60 // minutes
+        });
+        
+        return isCurrentlyOccurring;
       });
 
       if (currentEvents.length === 0) {
-        logger.info('No events currently occurring');
+        logger.info('No events currently occurring', { requestId });
         res.status(200).json({
           hasPending: false,
           message: 'No events currently occurring'
@@ -108,20 +165,54 @@ async function startServer(): Promise<void> {
       // Process the first currently occurring event
       const event = currentEvents[0];
       logger.info('Found currently occurring event', {
+        requestId,
         eventId: event.id,
+        calendarEventId: event.id,
         title: event.summary,
         start: event.start?.dateTime,
-        end: event.end?.dateTime
+        end: event.end?.dateTime,
+        isRecurring: !!(event.recurrence || event.recurringEventId),
+        hasRecurrence: !!event.recurrence,
+        hasRecurringEventId: !!event.recurringEventId
       });
 
       // Generate audio for this event on-demand
       const tempEventId = `poll_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
       const outputPath = storageService.getOutputAudioPath(tempEventId);
 
+      logger.debug('Starting audio generation', {
+        requestId,
+        tempEventId,
+        calendarEventId: event.id,
+        outputPath
+      });
+
       const audioResult = await controller.generateEventAudioAndDelete(
         event.id as string,
         outputPath
       );
+
+      logger.debug('Audio generation completed', {
+        requestId,
+        tempEventId,
+        success: audioResult.success,
+        hasAudioPath: !!audioResult.audioPath,
+        error: audioResult.error
+      });
+
+      // If event is already being processed by another request, return success with no audio
+      // This prevents duplicate processing and race conditions
+      if (!audioResult.success && audioResult.error === 'Event is already being processed') {
+        logger.info('Event is already being processed by another request, returning success', {
+          requestId,
+          eventId: event.id
+        });
+        res.status(200).json({
+          hasPending: false,
+          message: 'Event is already being processed by another request'
+        });
+        return;
+      }
 
       if (audioResult.success && audioResult.audioPath) {
         // Store the audio path with the calendar event ID
@@ -132,22 +223,36 @@ async function startServer(): Promise<void> {
         });
 
         logger.info('Audio generated for currently occurring event', {
+          requestId,
+          tempEventId,
           calendarEventId: event.id,
-          audioPath: audioResult.audioPath
+          audioPath: audioResult.audioPath,
+          title: event.summary
         });
 
-        res.status(200).json({
+        const responseData = {
           hasPending: true,
           eventId: tempEventId, // Return temp event ID for download
           calendarEventId: event.id,
           title: event.summary,
           start: event.start?.dateTime,
           end: event.end?.dateTime
+        };
+
+        logger.info('Sending response to client', {
+          requestId,
+          tempEventId,
+          calendarEventId: event.id,
+          hasPending: responseData.hasPending
         });
+
+        res.status(200).json(responseData);
       } else {
         logger.error('Failed to generate audio for current event', {
+          requestId,
           eventId: event.id,
-          error: audioResult.error
+          error: audioResult.error,
+          title: event.summary
         });
 
         res.status(500).json({
@@ -158,6 +263,7 @@ async function startServer(): Promise<void> {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       logger.error('Error checking for current events', {
+        requestId,
         error: errorMessage,
         stack: error instanceof Error ? error.stack : undefined
       });
@@ -325,7 +431,9 @@ export async function generateEventAudio(eventId: string, outputPath: string): P
     auth,
     config.calendarEmail,
     config.audioInputFormat,
-    config.audioOutputFormat
+    config.audioOutputFormat,
+    config.ttsVoice,
+    config.ttsSpeed
   );
 
   return await controller.generateEventAudioAndDelete(eventId, outputPath);
