@@ -5,6 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:https": "VITE_HTTPS=true vite",
+    "dev:tunnel": "ngrok http 5173 --host-header=rewrite",
+    "dev:tunnel:https": "ngrok http https://localhost:5173 --host-header=rewrite",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },

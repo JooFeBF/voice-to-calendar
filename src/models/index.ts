@@ -1,3 +1,3 @@
-export { EventDetails, EventOperation, RecurringEventUpdateScope } from './EventDetails';
+export { EventDetails, EventOperation, RecurringEventUpdateScope, EventDeleteScope } from './EventDetails';
 export { PipelineOptions } from './PipelineOptions';
 export { PipelineResult } from './PipelineResult';

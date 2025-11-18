@@ -158,17 +158,23 @@ export class AudioToCalendarController {
         });
 
       } else if (eventDetailsRaw.operation === 'delete') {
+        const deleteScope = eventDetailsRaw.delete_scope || 'all_events'; // Default to all_events
         logger.info('Deleting calendar event', { 
-          eventId: eventDetailsRaw.event_id 
+          eventId: eventDetailsRaw.event_id,
+          deleteScope
         });
         await RetryService.retryOperation(
-          () => this.calendarService.deleteEvent(eventDetailsRaw.event_id as string),
+          () => this.calendarService.deleteEvent(
+            eventDetailsRaw.event_id as string,
+            deleteScope
+          ),
           maxRetries,
           retryDelay
         );
-        operationResult = 'deleted';
+        operationResult = deleteScope === 'all_events' ? 'deleted (all instances)' : 'deleted (this instance)';
         logger.info('Calendar event deleted successfully', { 
-          eventId: eventDetailsRaw.event_id 
+          eventId: eventDetailsRaw.event_id,
+          deleteScope: eventDetailsRaw.delete_scope
         });
       } else if (eventDetailsRaw.operation === 'no_action') {
         logger.info('No action needed - event already exists', { 
@@ -366,7 +372,7 @@ export class AudioToCalendarController {
       } else {
         logger.debug('Deleting single event', { eventId });
         await RetryService.retryOperation(
-          () => this.calendarService.deleteEvent(eventId),
+          () => this.calendarService.deleteEvent(eventId, 'this_event'),
           maxRetries,
           retryDelay
         );

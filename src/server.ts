@@ -281,14 +281,26 @@ async function startServer(): Promise<void> {
     logger.info('Processing audio request', { eventId });
 
     try {
-      const inputPath = storageService.getInputAudioPath(eventId);
-      const outputPath = storageService.getOutputAudioPath(eventId);
-
-      if (!storageService.fileExists(inputPath)) {
-        logger.warn('Input audio file not found', { eventId, inputPath });
+      // Try to find the actual file - check common formats
+      const possibleFormats = ['.webm', '.ogg', '.wav', '.mp3', '.m4a', '.flac', config.audioInputFormat];
+      let inputPath: string | null = null;
+      
+      for (const format of possibleFormats) {
+        const testPath = storageService.getInputAudioPath(eventId, format);
+        if (storageService.fileExists(testPath)) {
+          inputPath = testPath;
+          logger.debug('Found audio file', { eventId, inputPath, format });
+          break;
+        }
+      }
+      
+      if (!inputPath) {
+        logger.warn('Input audio file not found', { eventId, triedFormats: possibleFormats });
         res.status(404).json({ error: 'Input audio file not found' });
         return;
       }
+      
+      const outputPath = storageService.getOutputAudioPath(eventId);
 
       logger.debug('Processing audio file', { eventId, inputPath });
       const result = await controller.processAudioFile(inputPath);
@@ -333,7 +345,30 @@ async function startServer(): Promise<void> {
         return;
       }
 
-      // Handle successful operations that created/updated/deleted an event
+      // Handle delete operations - no calendar event is returned for deletions
+      if (result.operation?.includes('deleted')) {
+        logger.info('Audio processed successfully, event deleted', {
+          eventId,
+          operation: result.operation,
+          deletedEventId: result.eventDetails?.event_id
+        });
+
+        storageService.setStatus(eventId, {
+          status: 'ready',
+          eventId: result.eventDetails?.event_id || undefined
+        });
+
+        res.status(200).json({
+          success: true,
+          eventId,
+          operation: result.operation,
+          eventDetails: result.eventDetails,
+          message: 'Event deleted successfully'
+        });
+        return;
+      }
+
+      // Handle successful operations that created/updated an event
       if (result.calendarEvent) {
         logger.info('Audio processed successfully, event created/updated', {
           eventId,
@@ -356,7 +391,7 @@ async function startServer(): Promise<void> {
           message: 'Event processed successfully. Poll /api/events/current to get audio when event is occurring.'
         });
       } else {
-        // This shouldn't happen, but handle it gracefully
+        // This shouldn't happen for create/update operations, but handle it gracefully
         storageService.setStatus(eventId, {
           status: 'error',
           error: 'Processing succeeded but no calendar event was returned'

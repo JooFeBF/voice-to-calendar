@@ -32,8 +32,13 @@ export class StreamStorageService {
     return `evt_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
   }
 
-  getInputAudioPath(eventId: string): string {
-    return path.join(this.storageDir, `${eventId}_input${this.inputFormat}`);
+  getInputAudioPath(eventId: string, customFormat?: string): string {
+    const format = customFormat || this.inputFormat;
+    return path.join(this.storageDir, `${eventId}_input${format}`);
+  }
+
+  getStorageDir(): string {
+    return this.storageDir;
   }
 
   getOutputAudioPath(eventId: string): string {
@@ -107,10 +112,14 @@ export class StreamStorageService {
     this.statusMap.delete(eventId);
     this.statusWaiters.delete(eventId);
     
-    const inputPath = this.getInputAudioPath(eventId);
-    const outputPath = this.getOutputAudioPath(eventId);
+    // Try to delete input file with various formats (in case format was detected dynamically)
+    const possibleFormats = ['.webm', '.ogg', '.wav', '.mp3', '.m4a', '.flac', this.inputFormat];
+    for (const format of possibleFormats) {
+      const inputPath = this.getInputAudioPath(eventId, format);
+      this.deleteFile(inputPath);
+    }
     
-    this.deleteFile(inputPath);
+    const outputPath = this.getOutputAudioPath(eventId);
     this.deleteFile(outputPath);
   }
 }

@@ -5,7 +5,11 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
+    host: '0.0.0.0', // Allow external connections
     port: 5173,
+    // Enable HTTPS for development (required for getUserMedia on mobile)
+    // Set VITE_HTTPS=true to enable. Vite will auto-generate a self-signed certificate
+    https: process.env.VITE_HTTPS === 'true',
     proxy: {
       '/api': {
         target: 'http://localhost:3000',

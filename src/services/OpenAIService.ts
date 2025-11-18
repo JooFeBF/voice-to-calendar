@@ -1,8 +1,14 @@
 import OpenAI from 'openai';
 import fs from 'fs';
+import path from 'path';
+import ffmpeg from 'fluent-ffmpeg';
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import { calendar_v3 } from 'googleapis';
 import { EventOperation, RecurringEventUpdateScope } from '../models';
 import logger from '../utils/logger';
+
+// Set ffmpeg path
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 interface ExtractedEventData {
   operation: EventOperation;
@@ -15,6 +21,7 @@ interface ExtractedEventData {
   attendees?: string[];
   recurrence?: string[];
   update_scope?: RecurringEventUpdateScope;
+  delete_scope?: 'this_event' | 'all_events';
 }
 
 export class OpenAIService {
@@ -61,17 +68,143 @@ export class OpenAIService {
     });
   }
 
+  private async waitForFileReady(filePath: string, maxWaitMs: number = 5000, checkIntervalMs: number = 100): Promise<void> {
+    const startTime = Date.now();
+    let lastSize = -1;
+    let stableCount = 0;
+    const requiredStableChecks = 3; // File size must be stable for 3 checks
+
+    while (Date.now() - startTime < maxWaitMs) {
+      if (!fs.existsSync(filePath)) {
+        await new Promise(resolve => setTimeout(resolve, checkIntervalMs));
+        continue;
+      }
+
+      const stats = fs.statSync(filePath);
+      const currentSize = stats.size;
+
+      if (currentSize === lastSize) {
+        stableCount++;
+        if (stableCount >= requiredStableChecks) {
+          // File size is stable, it's ready
+          if (currentSize === 0) {
+            throw new Error('Audio file is empty');
+          }
+          return;
+        }
+      } else {
+        stableCount = 0;
+        lastSize = currentSize;
+      }
+
+      await new Promise(resolve => setTimeout(resolve, checkIntervalMs));
+    }
+
+    // Final check
+    if (!fs.existsSync(filePath)) {
+      throw new Error('Audio file does not exist');
+    }
+
+    const finalStats = fs.statSync(filePath);
+    if (finalStats.size === 0) {
+      throw new Error('Audio file is empty');
+    }
+
+    logger.debug('File ready check completed', { filePath, size: finalStats.size });
+  }
+
+  private async convertToWav(inputPath: string, outputPath: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      logger.debug('Converting audio to WAV', { inputPath, outputPath });
+      
+      // Verify input file exists and has content
+      if (!fs.existsSync(inputPath)) {
+        reject(new Error(`Input file does not exist: ${inputPath}`));
+        return;
+      }
+
+      const stats = fs.statSync(inputPath);
+      if (stats.size === 0) {
+        reject(new Error(`Input file is empty: ${inputPath}`));
+        return;
+      }
+
+      logger.debug('Input file validated', { inputPath, size: stats.size });
+      
+      ffmpeg(inputPath)
+        .toFormat('wav')
+        .audioCodec('pcm_s16le')
+        .audioFrequency(16000)
+        .audioChannels(1)
+        .on('start', (commandLine: string) => {
+          logger.debug('FFmpeg command started', { commandLine });
+        })
+        .on('progress', (progress: any) => {
+          logger.debug('FFmpeg conversion progress', { progress });
+        })
+        .on('end', () => {
+          logger.debug('Audio conversion completed', { outputPath });
+          resolve(outputPath);
+        })
+        .on('error', (err: Error) => {
+          logger.error('Audio conversion error', { 
+            inputPath, 
+            error: err.message,
+            inputFileSize: stats.size,
+            inputFileExists: fs.existsSync(inputPath)
+          });
+          reject(err);
+        })
+        .save(outputPath);
+    });
+  }
+
   async transcribeAudio(filePath: string): Promise<string> {
     logger.info('Starting audio transcription', { filePath });
     const startTime = Date.now();
 
     try {
+      // Wait for file to be fully written (check file size stability)
+      await this.waitForFileReady(filePath);
+      
+      // Check if file needs conversion (WebM, OGG, etc. to WAV)
+      const fileExt = path.extname(filePath).toLowerCase();
+      
+      // OpenAI supports WebM directly, so we can skip conversion for WebM
+      // Only convert OGG/OGA which might not be supported
+      const needsConversion = ['.ogg', '.oga'].includes(fileExt);
+      
+      let audioFilePath = filePath;
+      let convertedFile: string | null = null;
+
+      if (needsConversion) {
+        logger.info('Converting audio file to WAV for OpenAI compatibility', { 
+          originalFormat: fileExt,
+          filePath 
+        });
+        
+        // Create temporary WAV file
+        const dir = path.dirname(filePath);
+        const baseName = path.basename(filePath, fileExt);
+        convertedFile = path.join(dir, `${baseName}_converted.wav`);
+        
+        audioFilePath = await this.convertToWav(filePath, convertedFile);
+      } else if (fileExt === '.webm') {
+        logger.info('Using WebM file directly (OpenAI supports WebM)', { filePath });
+      }
+
       const transcription = await this.client.audio.transcriptions.create({
-        file: fs.createReadStream(filePath),
+        file: fs.createReadStream(audioFilePath),
         model: 'whisper-1',
         response_format: 'text',
         language: 'es'
       });
+      
+      // Clean up converted file if it was created
+      if (convertedFile && fs.existsSync(convertedFile)) {
+        fs.unlinkSync(convertedFile);
+        logger.debug('Cleaned up converted audio file', { convertedFile });
+      }
       
       const duration = Date.now() - startTime;
       logger.info('Audio transcription completed', {
@@ -490,10 +623,17 @@ Al actualizar un evento recurrente, DEBES especificar update_scope:
 - "this_and_following": Actualizar esta y futuras
 - "all_events": Actualizar toda la serie
 
+Eliminación de Eventos Recurrentes:
+Al eliminar un evento, DEBES especificar delete_scope:
+- "this_event": Eliminar solo esta ocurrencia (para eventos recurrentes o eventos simples)
+- "all_events": Eliminar toda la serie (solo para eventos recurrentes)
+Si el usuario dice "elimina el evento", "cancela el evento", "borra el evento" sin especificar, asume "all_events" para eventos recurrentes.
+Si dice "elimina este evento", "cancela solo este", "borra esta vez", usa "this_event".
+
 Funciones disponibles:
 - create_calendar_event: Para crear un nuevo evento
 - update_calendar_event: Para actualizar un evento existente (requiere event_id)
-- delete_calendar_event: Para eliminar un evento (requiere event_id)
+- delete_calendar_event: Para eliminar un evento (requiere event_id y delete_scope)
 - no_action_needed: Cuando el evento solicitado ya existe exactamente igual`
         },
         { role: 'user', content: text }
@@ -568,9 +708,14 @@ Funciones disponibles:
                 event_id: { 
                   type: 'string',
                   description: 'El ID del evento a eliminar'
+                },
+                delete_scope: {
+                  type: 'string',
+                  enum: ['this_event', 'all_events'],
+                  description: 'Para eventos recurrentes: "this_event" para eliminar solo esta ocurrencia, "all_events" para eliminar toda la serie. Para eventos simples, usar "this_event"'
                 }
               },
-              required: ['event_id']
+              required: ['event_id', 'delete_scope']
             }
           }
         },

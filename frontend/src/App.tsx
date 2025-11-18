@@ -8,6 +8,7 @@ function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [permissionsGranted, setPermissionsGranted] = useState<boolean | null>(null);
   const [permissionMessage, setPermissionMessage] = useState<string>('');
+  const [permissionState, setPermissionState] = useState<'prompt' | 'granted' | 'denied' | 'unknown'>('unknown');
   const touchStartRef = useRef<number>(0);
 
   const { 
@@ -29,25 +30,54 @@ function App() {
     error: playError
   } = useAudioPlayer();
 
-  // Check and request permissions on mount
+  // Check permission status without requesting (non-blocking)
   useEffect(() => {
-    const checkPermissions = async () => {
-      try {
-        // Check microphone permission
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach(track => track.stop());
-        setPermissionsGranted(true);
-        setPermissionMessage('');
-      } catch (error) {
-        setPermissionsGranted(false);
-        setPermissionMessage(
-          'Se requieren permisos de micrófono y reproducción de audio. Por favor, otorga los permisos cuando se te solicite.'
-        );
-        console.error('Permission error:', error);
+    const checkPermissionStatus = async () => {
+      // Check if Permissions API is available
+      if ('permissions' in navigator && 'query' in navigator.permissions) {
+        try {
+          // Type assertion needed for microphone permission name
+          const result = await (navigator.permissions as any).query({ name: 'microphone' as PermissionName });
+          setPermissionState(result.state);
+          
+          if (result.state === 'granted') {
+            setPermissionsGranted(true);
+            setPermissionMessage('');
+          } else if (result.state === 'denied') {
+            setPermissionsGranted(false);
+            setPermissionMessage('Los permisos de micrófono están denegados. Por favor, habilítalos en la configuración de tu navegador.');
+          } else {
+            // 'prompt' state - permissions not yet requested
+            setPermissionsGranted(null);
+            setPermissionMessage('Presiona el botón para permitir el acceso al micrófono.');
+          }
+
+          // Listen for permission changes
+          result.onchange = () => {
+            setPermissionState(result.state);
+            if (result.state === 'granted') {
+              setPermissionsGranted(true);
+              setPermissionMessage('');
+            } else if (result.state === 'denied') {
+              setPermissionsGranted(false);
+              setPermissionMessage('Los permisos de micrófono están denegados. Por favor, habilítalos en la configuración de tu navegador.');
+            }
+          };
+        } catch (error) {
+          // Permissions API might not support 'microphone' in all browsers
+          console.log('Permissions API not fully supported, will check on user interaction');
+          setPermissionState('unknown');
+          setPermissionsGranted(null);
+        }
+      } else {
+        // Permissions API not available, check on user interaction
+        setPermissionState('unknown');
+        setPermissionsGranted(null);
+        setPermissionMessage('Presiona el botón para permitir el acceso al micrófono.');
       }
     };
 
-    checkPermissions();
+    checkPermissionStatus();
   }, []);
 
   // Auto-play audio when event is available and not recording
@@ -57,18 +87,57 @@ function App() {
     }
   }, [hasEvent, eventData, isRecording, isPlaying, playAudio]);
 
-  const handlePressStart = async () => {
-    if (!permissionsGranted) {
-      // Try to request permissions again
+  const handlePressStart = async (e?: React.MouseEvent | React.TouchEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    
+    // Request permissions on user gesture (required for mobile browsers)
+    if (permissionsGranted !== true) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Request microphone permission - this must be in response to user gesture
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            sampleRate: 16000,
+          } 
+        });
+        
+        // Permission granted - stop the test stream
         stream.getTracks().forEach(track => track.stop());
         setPermissionsGranted(true);
+        setPermissionState('granted');
         setPermissionMessage('');
-      } catch (error) {
-        setPermissionMessage('No se pueden obtener los permisos de micrófono. Verifica la configuración de tu navegador.');
+      } catch (error: any) {
+        // Handle different error types
+        let errorMessage = 'No se pueden obtener los permisos de micrófono.';
+        
+        if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+          errorMessage = 'Permisos de micrófono denegados. Por favor, habilítalos en la configuración de tu navegador y recarga la página.';
+          setPermissionState('denied');
+        } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
+          errorMessage = 'No se encontró ningún micrófono. Por favor, conecta un micrófono e intenta de nuevo.';
+        } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
+          errorMessage = 'El micrófono está siendo usado por otra aplicación. Por favor, cierra otras aplicaciones e intenta de nuevo.';
+        } else if (error.name === 'OverconstrainedError' || error.name === 'ConstraintNotSatisfiedError') {
+          errorMessage = 'El micrófono no cumple con los requisitos. Por favor, intenta con otro dispositivo.';
+        } else if (error.name === 'SecurityError') {
+          errorMessage = 'Error de seguridad. La página debe estar servida sobre HTTPS o localhost. Para desarrollo, usa localhost o habilita HTTPS en Vite.';
+        } else if (error.name === 'TypeError') {
+          errorMessage = 'getUserMedia no está disponible. Asegúrate de usar un navegador compatible. Nota: localhost funciona sin HTTPS.';
+        }
+        
+        setPermissionsGranted(false);
+        setPermissionMessage(errorMessage);
+        console.error('Permission error:', error);
         return;
       }
+    }
+
+    if (isUploading || isPlaying) {
+      return;
     }
 
     touchStartRef.current = Date.now();
@@ -76,7 +145,12 @@ function App() {
     await startRecording();
   };
 
-  const handlePressEnd = async () => {
+  const handlePressEnd = async (e?: React.MouseEvent | React.TouchEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    
     const pressDuration = Date.now() - touchStartRef.current;
     
     // Minimum press duration of 300ms to avoid accidental taps
@@ -104,15 +178,15 @@ function App() {
         onMouseDown={handlePressStart}
         onMouseUp={handlePressEnd}
         onMouseLeave={handlePressEnd}
-        onTouchStart={(e) => {
+        onTouchStart={handlePressStart}
+        onTouchEnd={handlePressEnd}
+        onTouchCancel={handlePressEnd}
+        onTouchMove={(e) => {
+          // Prevent scrolling when touching the button
           e.preventDefault();
-          handlePressStart();
-        }}
-        onTouchEnd={(e) => {
-          e.preventDefault();
-          handlePressEnd();
         }}
         disabled={isUploading || isPlaying}
+        type="button"
       >
         <div className="button-content">
           {isUploading ? (
@@ -137,6 +211,10 @@ function App() {
               </div>
               <span className="button-text blinking">Grabando...</span>
             </>
+          ) : permissionsGranted === false ? (
+            <span className="button-text">Permisos denegados - Toca para intentar de nuevo</span>
+          ) : permissionsGranted === null ? (
+            <span className="button-text">Toca para permitir el micrófono</span>
           ) : (
             <span className="button-text">Mantén presionado para recordar</span>
           )}

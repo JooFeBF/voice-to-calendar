@@ -1,4 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
+import fs from 'fs';
+import path from 'path';
 import { StreamStorageService } from '../services';
 import { Config } from '../config';
 import logger from '../utils/logger';
@@ -8,7 +10,31 @@ export function createAudioRoutes(storageService: StreamStorageService, config: 
 
   router.post('/upload-stream', async (req: Request, res: Response, next: NextFunction) => {
     const eventId = storageService.generateEventId();
-    const writeStream = storageService.createWriteStream(eventId);
+    
+    // Detect actual audio format from Content-Type header
+    const contentType = req.headers['content-type'] || '';
+    let detectedFormat = config.audioInputFormat; // Default to config format
+    
+    // Map MIME types to file extensions
+    if (contentType.includes('webm')) {
+      detectedFormat = '.webm';
+    } else if (contentType.includes('ogg')) {
+      detectedFormat = '.ogg';
+    } else if (contentType.includes('wav')) {
+      detectedFormat = '.wav';
+    } else if (contentType.includes('mp3')) {
+      detectedFormat = '.mp3';
+    } else if (contentType.includes('mpeg')) {
+      detectedFormat = '.mp3';
+    } else if (contentType.includes('m4a')) {
+      detectedFormat = '.m4a';
+    } else if (contentType.includes('flac')) {
+      detectedFormat = '.flac';
+    }
+    
+    // Create write stream with detected format
+    const inputPath = storageService.getInputAudioPath(eventId, detectedFormat);
+    const writeStream = fs.createWriteStream(inputPath);
 
     storageService.setStatus(eventId, { status: 'processing' });
 
@@ -21,7 +47,12 @@ export function createAudioRoutes(storageService: StreamStorageService, config: 
 
     req.on('end', () => {
       writeStream.end();
-      logger.info('Audio upload complete', { eventId, bytesReceived: receivedBytes });
+      logger.info('Audio upload complete', { 
+        eventId, 
+        bytesReceived: receivedBytes,
+        detectedFormat,
+        contentType
+      });
       
       res.status(200).json({
         success: true,
